@@ -246,6 +246,19 @@ void setup() {
   // Initialize moving average filters
   initializeFilters();
   
+  // Initialize preferences for credential and settings storage
+  preferences.begin("settings", false);
+  
+  // Load persisted thresholds (fallback to compile-time defaults)
+  configurable_mq2_threshold = preferences.getInt("mq2_threshold", MQ2_THRESHOLD);
+  configurable_mq5_threshold = preferences.getInt("mq5_threshold", MQ5_THRESHOLD);
+  preferences.end();
+  
+  Serial.print("Loaded MQ2 threshold: ");
+  Serial.println(configurable_mq2_threshold);
+  Serial.print("Loaded MQ5 threshold: ");
+  Serial.println(configurable_mq5_threshold);
+  
   // Initialize WiFi
   initWiFi();
   
@@ -700,15 +713,37 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     DeserializationError error = deserializeJson(doc, message);
     
     if (!error) {
+      bool changed = false;
       if (doc.containsKey("mq2_threshold")) {
         configurable_mq2_threshold = doc["mq2_threshold"];
         Serial.print("MQ2 threshold updated: ");
         Serial.println(configurable_mq2_threshold);
+        changed = true;
       }
       if (doc.containsKey("mq5_threshold")) {
         configurable_mq5_threshold = doc["mq5_threshold"];
         Serial.print("MQ5 threshold updated: ");
         Serial.println(configurable_mq5_threshold);
+        changed = true;
+      }
+      
+      // Persist to NVS so thresholds survive reboot
+      if (changed) {
+        preferences.begin("settings", false);
+        preferences.putInt("mq2_threshold", configurable_mq2_threshold);
+        preferences.putInt("mq5_threshold", configurable_mq5_threshold);
+        preferences.end();
+        
+        Serial.println("Thresholds saved to NVS");
+        
+        // Optional: send acknowledgment back to dashboard
+        StaticJsonDocument<200> ack;
+        ack["mq2_threshold"] = configurable_mq2_threshold;
+        ack["mq5_threshold"] = configurable_mq5_threshold;
+        ack["status"] = "saved";
+        String ackPayload;
+        serializeJson(ack, ackPayload);
+        mqttClient.publish("home/config/thresholds/ack", ackPayload.c_str(), true);
       }
     }
   }
