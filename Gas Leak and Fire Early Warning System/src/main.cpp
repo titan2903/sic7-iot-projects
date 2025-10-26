@@ -42,9 +42,9 @@
 const int MQ2_AO_PIN = 34;     // Smoke sensor (ADC1 channel) - connect to AO (Analog Output)
 const int MQ5_AO_PIN = 35;     // LPG gas sensor (ADC1 channel) - connect to AO (Analog Output)
 const int FLAME_DO_PIN = 25;   // Flame sensor (digital) - connect to DO (Digital Output)
-const int LED_RED_PIN = 5;     // Gas detection LED
 const int LED_BLUE_PIN = 2;    // Smoke detection LED  
 const int LED_YELLOW_PIN = 4;  // Fire detection LED
+const int LED_RED_PIN = 5;     // Gas detection LED
 const int BUZZER_PIN = 22;     // Buzzer output
 
 // Thresholds (CALIBRATION REQUIRED!)
