@@ -28,6 +28,7 @@ from collections import deque
 import os
 import asyncio
 from dotenv import load_dotenv
+import traceback
 
 # MQTT and InfluxDB imports
 import paho.mqtt.client as mqtt
@@ -207,6 +208,7 @@ def get_historical_data(hours=6):
 def get_historical_data_table(time_range="6h"):
     """Get detailed historical sensor data for table display with CSV export capability"""
     if not influxdb_client:
+        print("InfluxDB client is not available")
         return pd.DataFrame()
 
     try:
@@ -217,8 +219,7 @@ def get_historical_data_table(time_range="6h"):
 
         hours = duration_map.get(time_range, 6)
 
-        # Use the same measurement name we write to (`sensor_readings`) and the
-        # flame field name (`flame_digital`) used when writing points.
+        # Query for sensor readings only (detection events will be added as computed columns)
         query = f"""
         from(bucket: "{INFLUXDB_BUCKET}")
         |> range(start: -{hours}h)
@@ -236,10 +237,19 @@ def get_historical_data_table(time_range="6h"):
         # query_data_frame is easier to work with than iterating low-level
         # Flux records — the pivot() in the query will produce wide-form rows
         # with columns named after the fields (e.g. mq2_raw, mq2_filtered).
+        print("Executing InfluxDB query...")
         df_raw = query_api.query_data_frame(query=query, org=INFLUXDB_ORG)
 
-        if df_raw is None or df_raw.empty:
+        if df_raw is None or (hasattr(df_raw, "empty") and df_raw.empty):
+            print("No data returned from InfluxDB")
             return pd.DataFrame()
+
+        # Handle case where InfluxDB returns a list instead of DataFrame
+        if isinstance(df_raw, list):
+            if len(df_raw) == 0:
+                return pd.DataFrame()
+            # Take the first DataFrame from the list
+            df_raw = df_raw[0] if len(df_raw) > 0 else pd.DataFrame()
 
         # The returned DataFrame may include metadata rows; ensure we have
         # a proper dataframe with _time and field columns. After pivot, the
@@ -275,6 +285,20 @@ def get_historical_data_table(time_range="6h"):
             .apply(lambda x: "Detected" if x == 1 else "Normal")
         )
 
+        # Add Gas Detected and Smoke Detected status columns based on sensor values and thresholds
+        # Use current thresholds to determine detection status
+        df["Gas Detected"] = (
+            df.get("mq5_filtered", pd.Series())
+            .fillna(0)
+            .apply(lambda x: "🚨 YES" if x > current_thresholds["mq5"] else "✅ No")
+        )
+
+        df["Smoke Detected"] = (
+            df.get("mq2_filtered", pd.Series())
+            .fillna(0)
+            .apply(lambda x: "🚨 YES" if x > current_thresholds["mq2"] else "✅ No")
+        )
+
         # Select only the columns we want to display
         result_df = df[
             [
@@ -284,13 +308,16 @@ def get_historical_data_table(time_range="6h"):
                 "MQ5 Raw",
                 "MQ5 Filtered",
                 "Flame Status",
+                "Gas Detected",
+                "Smoke Detected",
             ]
         ]
 
         return result_df
 
     except Exception as e:
-        print(f"Error querying InfluxDB for table: {e}")
+
+        traceback.print_exc()
         return pd.DataFrame()  # Return empty DataFrame on error
 
 
@@ -1445,6 +1472,8 @@ def update_table_data(time_range, n_intervals):
                         "format": {"specifier": ".0f"},
                     },
                     {"name": "Flame Status", "id": "Flame Status", "type": "text"},
+                    {"name": "Gas Detected", "id": "Gas Detected", "type": "text"},
+                    {"name": "Smoke Detected", "id": "Smoke Detected", "type": "text"},
                 ],
                 style_table={
                     "overflowX": "auto",
@@ -1467,9 +1496,38 @@ def update_table_data(time_range, n_intervals):
                     "backgroundColor": "#f8f9fa",
                     "color": "black",
                 },
+                # Conditional styling: highlight flame, MQ2 and MQ5 when values exceed thresholds
                 style_data_conditional=[
                     {
                         "if": {"filter_query": "{Flame Status} = Detected"},
+                        "backgroundColor": "#f8d7da",
+                        "color": "black",
+                    },
+                    # Highlight MQ2 Filtered when above MQ2 threshold
+                    {
+                        "if": {
+                            "filter_query": f"{{MQ2 Filtered}} > {current_thresholds['mq2']}"
+                        },
+                        "backgroundColor": "#f8d7da",
+                        "color": "black",
+                    },
+                    # Highlight MQ5 Filtered when above MQ5 threshold
+                    {
+                        "if": {
+                            "filter_query": f"{{MQ5 Filtered}} > {current_thresholds['mq5']}"
+                        },
+                        "backgroundColor": "#f8d7da",
+                        "color": "black",
+                    },
+                    # Highlight Gas Detected when detected
+                    {
+                        "if": {"filter_query": "{Gas Detected} contains YES"},
+                        "backgroundColor": "#f8d7da",
+                        "color": "black",
+                    },
+                    # Highlight Smoke Detected when detected
+                    {
+                        "if": {"filter_query": "{Smoke Detected} contains YES"},
                         "backgroundColor": "#f8d7da",
                         "color": "black",
                     },
@@ -1530,20 +1588,21 @@ def update_table_data_only(n_intervals, time_range):
     """Update only table data to preserve pagination state"""
     try:
         # Only update every 30 seconds to reduce load and avoid interrupting user interaction
-        if (
-            n_intervals % 10 != 0
-        ):  # Update every 10th interval (30 seconds if interval is 3s)
-            raise PreventUpdate
-
+        print(
+            f"Table update called: n_intervals={n_intervals}, time_range={time_range}"
+        )
         time_range = time_range or "6h"
+        print(f"Getting historical data for table with time_range: {time_range}")
         df = get_historical_data_table(time_range)
 
         if df.empty:
             raise PreventUpdate
 
-        return df.to_dict("records")
+        records = df.to_dict("records")
+        print(f"Successfully returning {len(records)} table records")
+        return records
     except Exception as e:
-        print(f"Error updating table data: {e}")
+        traceback.print_exc()
         raise PreventUpdate
 
 
