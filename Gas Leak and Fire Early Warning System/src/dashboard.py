@@ -259,17 +259,17 @@ def init_mqtt():
     global mqtt_client
     try:
         import ssl
-        
+
         mqtt_client = mqtt.Client(client_id=MQTT_CLIENT_ID)
         mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
         mqtt_client.on_connect = on_mqtt_connect
         mqtt_client.on_message = on_mqtt_message
-        
+
         # Configure TLS for HiveMQ Cloud (port 8883)
         if int(MQTT_PORT) == 8883:
             context = ssl.create_default_context()
             mqtt_client.tls_set_context(context)
-        
+
         mqtt_client.connect(MQTT_BROKER, int(MQTT_PORT), 60)
 
         # Start MQTT loop in background thread
@@ -305,6 +305,7 @@ async def telegram_start(update, context: ContextTypes.DEFAULT_TYPE):
         "/off - Turn buzzer OFF\n"
         "/auto - Set buzzer to AUTO mode\n"
         "/thresholds - Show current thresholds\n"
+        "/history - Show last 1 hour data summary\n"
         "/help - Show this help message"
     )
 
@@ -361,6 +362,87 @@ async def telegram_buzzer_auto(update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Failed to send command")
 
 
+async def telegram_thresholds(update, context: ContextTypes.DEFAULT_TYPE):
+    """Telegram /thresholds command"""
+    latest_data = sensor_data[-1] if sensor_data else {}
+
+    thresholds_text = "⚙️ Current Thresholds:\n\n"
+    thresholds_text += f"🌬️ MQ-2 (Smoke): {current_thresholds['mq2']}\n"
+    thresholds_text += f"⛽ MQ-5 (Gas): {current_thresholds['mq5']}\n\n"
+
+    if latest_data:
+        thresholds_text += "📊 Current Values:\n"
+        thresholds_text += f"🌬️ MQ-2: {latest_data.get('mq2_filtered', 'N/A')}\n"
+        thresholds_text += f"⛽ MQ-5: {latest_data.get('mq5_filtered', 'N/A')}"
+
+    await update.message.reply_text(thresholds_text)
+
+
+async def telegram_history(update, context: ContextTypes.DEFAULT_TYPE):
+    """Telegram /history command - show last 1 hour data summary"""
+    try:
+        # Get last 1 hour of data from InfluxDB
+        df = get_historical_data(hours=1)
+
+        if df.empty:
+            await update.message.reply_text(
+                "📊 No historical data available for the last hour"
+            )
+            return
+
+        # Process data for summary
+        history_text = "📈 Last 1 Hour Summary:\n\n"
+
+        # Get MQ2 data
+        mq2_data = df[df["_field"] == "mq2_filtered"]
+        if not mq2_data.empty:
+            mq2_avg = mq2_data["_value"].mean()
+            mq2_max = mq2_data["_value"].max()
+            mq2_min = mq2_data["_value"].min()
+            history_text += f"🌬️ MQ-2 (Smoke):\n"
+            history_text += f"   • Average: {mq2_avg:.1f}\n"
+            history_text += f"   • Max: {mq2_max:.1f}\n"
+            history_text += f"   • Min: {mq2_min:.1f}\n\n"
+
+        # Get MQ5 data
+        mq5_data = df[df["_field"] == "mq5_filtered"]
+        if not mq5_data.empty:
+            mq5_avg = mq5_data["_value"].mean()
+            mq5_max = mq5_data["_value"].max()
+            mq5_min = mq5_data["_value"].min()
+            history_text += f"⛽ MQ-5 (Gas):\n"
+            history_text += f"   • Average: {mq5_avg:.1f}\n"
+            history_text += f"   • Max: {mq5_max:.1f}\n"
+            history_text += f"   • Min: {mq5_min:.1f}\n\n"
+
+        # Add alert summary from last hour
+        current_time = datetime.now()
+        one_hour_ago = current_time - timedelta(hours=1)
+        recent_alerts = [
+            alert
+            for alert in alert_history
+            if alert.get("timestamp", current_time) >= one_hour_ago
+        ]
+
+        if recent_alerts:
+            history_text += f"🚨 Alerts (Last Hour): {len(recent_alerts)}\n"
+            alert_types = {}
+            for alert in recent_alerts:
+                alert_type = alert.get("alert_type", "unknown")
+                alert_types[alert_type] = alert_types.get(alert_type, 0) + 1
+
+            for alert_type, count in alert_types.items():
+                history_text += f"   • {alert_type.title()}: {count}\n"
+        else:
+            history_text += "✅ No alerts in the last hour"
+
+        await update.message.reply_text(history_text)
+
+    except Exception as e:
+        print(f"Error in telegram_history: {e}")
+        await update.message.reply_text("❌ Failed to retrieve historical data")
+
+
 def send_telegram_alert(alert):
     """Send alert notification to Telegram"""
     if not telegram_bot or not TELEGRAM_CHAT_IDS:
@@ -407,6 +489,8 @@ def init_telegram():
         telegram_app.add_handler(CommandHandler("on", telegram_buzzer_on))
         telegram_app.add_handler(CommandHandler("off", telegram_buzzer_off))
         telegram_app.add_handler(CommandHandler("auto", telegram_buzzer_auto))
+        telegram_app.add_handler(CommandHandler("thresholds", telegram_thresholds))
+        telegram_app.add_handler(CommandHandler("history", telegram_history))
 
         # Start bot in background thread
         def run_telegram():

@@ -28,6 +28,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -158,7 +159,7 @@ int buzzer_pulse_count = 0;
 // WIFI & MQTT GLOBAL VARIABLES
 // ============================================================================
 
-WiFiClient wifiClient;
+WiFiClientSecure wifiClient;
 PubSubClient mqttClient(wifiClient);
 Preferences preferences;
 ESP32Time rtc;
@@ -475,21 +476,26 @@ void controlLEDs() {
 void controlBuzzer() {
   unsigned long current_time = millis();
   
-  // Handle remote buzzer override
+  // Handle remote buzzer override first (priority)
   if (remote_buzzer_override) {
     if (remote_buzzer_state) {
+      // Buzzer ON - continuous tone
       ledcSetup(LEDC_CHANNEL, BUZZER_SMOKE_FREQ, LEDC_RESOLUTION);
-      ledcWrite(LEDC_CHANNEL, 128); // 50% duty cycle
+      ledcWrite(LEDC_CHANNEL, 128); // 50% duty cycle - continuous
+      Serial.println("DEBUG: Remote buzzer ON - continuous tone");
     } else {
+      // Buzzer OFF
       ledcWrite(LEDC_CHANNEL, 0); // Off
+      Serial.println("DEBUG: Remote buzzer OFF");
     }
-    return;
+    return; // Exit early - remote override takes precedence
   }
   
+  // AUTO mode: buzzer controlled by hazard detection
   bool any_hazard = smoke_detected || gas_detected || fire_detected;
   bool multi_hazard = (smoke_detected + gas_detected + fire_detected) > 1;
   
-  // Turn off buzzer if no hazards detected
+  // Turn off buzzer if no hazards detected in AUTO mode
   if (!any_hazard) {
     ledcWrite(LEDC_CHANNEL, 0); // Turn off PWM
     buzzer_state = false;
@@ -667,6 +673,15 @@ void initMQTT() {
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
   
+  // Configure TLS for HiveMQ Cloud (port 8883)
+  wifiClient.setInsecure(); // Skip certificate verification for simplicity
+  // For production, use: wifiClient.setCACert(root_ca);
+  
+  Serial.print("MQTT server: ");
+  Serial.print(MQTT_SERVER);
+  Serial.print(":");
+  Serial.println(MQTT_PORT);
+  
   if (wifi_connected) {
     reconnectMQTT();
   }
@@ -688,14 +703,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (message == "ON") {
       remote_buzzer_override = true;
       remote_buzzer_state = true;
-      Serial.println("Remote buzzer: ON");
+      Serial.println("MQTT: Remote buzzer set to ON (override=true, state=true)");
     } else if (message == "OFF") {
       remote_buzzer_override = true;
       remote_buzzer_state = false;
-      Serial.println("Remote buzzer: OFF");
+      Serial.println("MQTT: Remote buzzer set to OFF (override=true, state=false)");
     } else if (message == "AUTO") {
       remote_buzzer_override = false;
-      Serial.println("Remote buzzer: AUTO");
+      Serial.println("MQTT: Remote buzzer set to AUTO (override=false)");
     }
   }
   
@@ -774,6 +789,21 @@ void reconnectMQTT() {
       mqtt_connected = false;
       Serial.print(" failed, rc=");
       Serial.print(mqttClient.state());
+      
+      // Print detailed error message
+      switch(mqttClient.state()) {
+        case -4: Serial.println(" (Connection timeout)"); break;
+        case -3: Serial.println(" (Connection lost)"); break;
+        case -2: Serial.println(" (Connect failed)"); break;
+        case -1: Serial.println(" (Disconnected)"); break;
+        case 1: Serial.println(" (Bad protocol)"); break;
+        case 2: Serial.println(" (Bad client ID)"); break;
+        case 3: Serial.println(" (Unavailable)"); break;
+        case 4: Serial.println(" (Bad credentials)"); break;
+        case 5: Serial.println(" (Unauthorized)"); break;
+        default: Serial.println(" (Unknown error)"); break;
+      }
+      
       Serial.println(" retrying in 5 seconds");
     }
   }
