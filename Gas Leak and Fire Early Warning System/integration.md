@@ -5,6 +5,7 @@
 2. **Python Dashboard**: Gunakan library seperti Dash, Plotly atau Flask untuk membuat dashboard web yang menampilkan data secara real-time
 3. **InfluxDB**: Simpan data sensor ke InfluxDB untuk analisis jangka panjang
 4. **Telegram Bot**: Kirim notifikasi ke Telegram ketika terdeteksi gas, asap, atau api
+5. **WiFi Connectivity (ESP32)**: Pastikan ESP32 dapat terhubung ke jaringan WiFi dengan stabil dan aman.
 
 # Keperluan integrasi
 1. **MQTT Broker**:
@@ -111,6 +112,19 @@
        - Whitelist chat IDs untuk security
        - Admin-only commands untuk device control
        - User role management (admin, viewer, operator)
+
+5. **WiFi Integration (ESP32)**:
+    - Gunakan library WiFi.h untuk menghubungkan ESP32 ke jaringan WiFi.
+    - Fitur Koneksi WiFi:
+      - Auto-reconnect ketika koneksi terputus
+      - Multiple SSID support (fallback ke SSID kedua jika SSID pertama gagal)
+      - Static IP configuration (opsional)
+      - WiFi signal strength monitoring (RSSI)
+      - Error handling untuk koneksi gagal
+      - Indikator status koneksi (LED atau serial output)
+    - Credentials WiFi:
+      - SSID 1: "kosasi kost lt 2"
+      - Password 1: "kosasikost2"
 
 # Implementasi Requirements
 ## ESP32 Code Requirements (main.cpp):
