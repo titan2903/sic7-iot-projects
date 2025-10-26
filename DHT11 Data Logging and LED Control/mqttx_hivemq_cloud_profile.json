@@ -1,0 +1,93 @@
+{
+  "clientType": "MQTTX",
+  "version": "1.9.3",
+  "connections": [
+    {
+      "id": "hivemq-cloud-dht11-system",
+      "name": "HiveMQ Cloud - DHT11 System",
+      "clientId": "mqttx_dht11_hivemq_cloud",
+      "host": "YOUR_CLUSTER_HOST.s1.hivemq.cloud",
+      "port": 8883,
+      "keepalive": 60,
+      "connectTimeout": 30,
+      "reconnect": true,
+      "clean": true,
+      "protocol": "mqtt",
+      "username": "YOUR_HIVEMQ_USERNAME",
+      "password": "YOUR_HIVEMQ_PASSWORD",
+      "ssl": true,
+      "certType": "",
+      "ca": "",
+      "cert": "",
+      "key": "",
+      "rejectUnauthorized": true,
+      "alpnProtocol": "",
+      "subscriptions": [
+        {
+          "topic": "sic/dibimbing/catalina/titanio-yudista/pub/dht",
+          "qos": 0,
+          "alias": "DHT11 Sensor Data",
+          "color": "#1890FF"
+        },
+        {
+          "topic": "sic/dibimbing/catalina/titanio-yudista/sub/led",
+          "qos": 0,
+          "alias": "LED Control Commands",
+          "color": "#52C41A"
+        }
+      ],
+      "messages": [
+        {
+          "id": "led-on-command",
+          "topic": "sic/dibimbing/catalina/titanio-yudista/sub/led",
+          "qos": 0,
+          "retain": false,
+          "payload": "{\"command\":\"ON\",\"timestamp\":\"2024-01-15T10:30:00Z\"}",
+          "payloadType": "JSON"
+        },
+        {
+          "id": "led-off-command", 
+          "topic": "sic/dibimbing/catalina/titanio-yudista/sub/led",
+          "qos": 0,
+          "retain": false,
+          "payload": "{\"command\":\"OFF\",\"timestamp\":\"2024-01-15T10:30:00Z\"}",
+          "payloadType": "JSON"
+        },
+        {
+          "id": "led-blink-command",
+          "topic": "sic/dibimbing/catalina/titanio-yudista/sub/led",
+          "qos": 0,
+          "retain": false,
+          "payload": "{\"command\":\"BLINK\",\"timestamp\":\"2024-01-15T10:30:00Z\"}",
+          "payloadType": "JSON"
+        }
+      ],
+      "properties": {
+        "sessionExpiryInterval": 0,
+        "receiveMaximum": 65535,
+        "maximumPacketSize": 268435455,
+        "topicAliasMaximum": 0,
+        "requestResponseInformation": false,
+        "requestProblemInformation": true,
+        "userProperties": [],
+        "authenticationMethod": "",
+        "authenticationData": ""
+      },
+      "will": {
+        "lastWillTopic": "",
+        "lastWillPayload": "",
+        "lastWillQos": 0,
+        "lastWillRetain": false,
+        "properties": {
+          "willDelayInterval": 0,
+          "payloadFormatIndicator": false,
+          "messageExpiryInterval": 0,
+          "contentType": "",
+          "responseTopic": "",
+          "correlationData": "",
+          "userProperties": []
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "author": "Titanio Yudista",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-breadboard-half", "id": "bb1", "top": -99, "left": -227.6, "attrs": {} },
+    {
+      "type": "board-esp32-devkit-c-v4",
+      "id": "esp",
+      "top": -135.54,
+      "left": 313.7,
+      "rotate": 270,
+      "attrs": {}
+    },
+    { "type": "wokwi-dht22", "id": "dht1", "top": -316.5, "left": 13.8, "attrs": {} }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "bb1:bn.25", "esp:GND.2", "black", [ "v0" ] ],
+    [ "esp:3V3", "bb1:bp.25", "#8f4814", [ "h0" ] ],
+    [ "dht1:VCC", "bb1:bp.24", "#8f4814", [ "v0" ] ],
+    [ "dht1:GND", "bb1:bn.24", "black", [ "v0" ] ],
+    [ "dht1:SDA", "esp:5", "green", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}

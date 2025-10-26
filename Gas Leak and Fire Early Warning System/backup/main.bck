@@ -1,0 +1,494 @@
+/*
+ * Gas Leak and Fire Early Warning System
+ * Board: ESP32 DevKit v1
+ * File: main.cpp (PlatformIO compatible)
+ * 
+ * Hardware:
+ * - MQ-2 (smoke) -> GPIO34 (ADC1, analog) - connect to AO (Analog Output)
+ * - MQ-5 (LPG gas) -> GPIO35 (ADC1, analog) - connect to AO (Analog Output)
+ * - Flame sensor -> GPIO33 (ADC1, analog) - connect to AO (Analog Output)
+ * - LED Red (GAS) -> GPIO5
+ * - LED Blue (SMOKE) -> GPIO2
+ * - LED Yellow (FIRE) -> GPIO4
+ * - Buzzer -> GPIO22 (PASSIVE buzzer, requires PWM/LEDC for tone generation)
+ * 
+ * Features:
+ * 
+ * - Moving average filtering (5 samples) for all sensors (MQ-2, MQ-5, Flame)
+ * - Flame sensor debouncing (3 consecutive readings) to prevent false alarms
+ * - Non-blocking timing for sensor reading and buzzer patterns
+ * - Different buzzer tones for different hazards (PWM/LEDC frequencies)
+ *   • Gas: 800 Hz (low pitch)
+ *   • Smoke: 1000 Hz (medium pitch)
+ *   • Fire: 1200 Hz (high pitch)
+ *   • Multi-hazard: 1500 Hz (highest pitch)
+ * - Serial logging every 1 second with raw ADC and status
+ * - Configurable thresholds (calibration required)
+ */
+
+#include <Arduino.h>
+
+// ============================================================================
+// CONFIGURATION - Adjust these values according to your setup and calibration
+// ============================================================================
+
+// Pin definitions
+const int MQ2_AO_PIN = 34;     // Smoke sensor (ADC1 channel) - connect to AO (Analog Output)
+const int MQ5_AO_PIN = 35;     // LPG gas sensor (ADC1 channel) - connect to AO (Analog Output)
+const int FLAME_AO_PIN = 33;   // Flame sensor (ADC1, analog) - connect to AO (Analog Output)
+const int LED_RED_PIN = 5;     // Gas detection LED
+const int LED_BLUE_PIN = 2;    // Smoke detection LED  
+const int LED_YELLOW_PIN = 4;  // Fire detection LED
+const int BUZZER_PIN = 22;     // Buzzer output
+
+// Thresholds (CALIBRATION REQUIRED!)
+// These are scaled estimates for ESP32 ADC (0..4095)
+// To calibrate: Take readings in clean environment for several minutes,
+// calculate average, then set threshold = average + 20-40% margin
+const int MQ2_THRESHOLD = 350;  // Smoke threshold (increased for safety and false alarms)
+const int MQ5_THRESHOLD = 800;  // Gas threshold (increased for safety and false alarms)
+
+// Flame sensor threshold (CALIBRATION REQUIRED!)
+// Flame sensors typically pull voltage LOW when flame is detected. Set this
+// threshold by measuring the analog value in a clean environment and choose
+// a margin. Value is 0..4095 (12-bit ADC)
+// Increased threshold to avoid false positives from floating/unstable input
+const int FLAME_THRESHOLD = 1024;
+// ADC saturation threshold: values >= this are considered saturated/invalid
+// Increase this value (up to 4095) to be less aggressive about flagging
+// saturation. Decrease it to flag saturation earlier (more conservative).
+const int ADC_SATURATION = 4096;
+ 
+// Timing intervals
+const unsigned long SENSOR_READ_INTERVAL = 500;  // Read sensors every 500ms
+const unsigned long SERIAL_LOG_INTERVAL = 1000;  // Log to serial every 1s
+const unsigned long BUZZER_GAS_ON = 400;         // Gas buzzer pattern: 400ms ON
+const unsigned long BUZZER_GAS_OFF = 400;        // Gas buzzer pattern: 400ms OFF
+const unsigned long BUZZER_SMOKE_ON = 350;       // Smoke buzzer pattern: 350ms ON
+const unsigned long BUZZER_SMOKE_OFF = 350;      // Smoke buzzer pattern: 350ms OFF
+const unsigned long BUZZER_FIRE_ON = 300;        // Fire buzzer pattern: 300ms ON
+const unsigned long BUZZER_FIRE_OFF = 300;       // Fire buzzer pattern: 300ms OFF
+const unsigned long BUZZER_MULTI_ON = 200;       // Multi-hazard pattern: 200ms ON
+const unsigned long BUZZER_MULTI_OFF = 100;      // Multi-hazard pattern: 100ms OFF
+
+// Passive buzzer LEDC configuration
+const int LEDC_CHANNEL = 0;          // LEDC channel (0-15)
+const int LEDC_RESOLUTION = 8;       // 8-bit resolution (0-255)
+const int BUZZER_GAS_FREQ = 800;     // Gas detection frequency (Hz)
+const int BUZZER_SMOKE_FREQ = 1000;  // Smoke detection frequency (Hz)
+const int BUZZER_FIRE_FREQ = 1200;   // Fire detection frequency (Hz)
+const int BUZZER_MULTI_FREQ = 1500;  // Multi-hazard frequency (Hz)
+
+// Moving average filter settings
+const int FILTER_SIZE = 5;
+
+// ============================================================================
+// GLOBAL VARIABLES
+// ============================================================================
+
+// Moving average buffers
+int mq2_readings[FILTER_SIZE];
+int mq5_readings[FILTER_SIZE];
+int mq2_index = 0;
+int mq5_index = 0;
+long mq2_total = 0;
+long mq5_total = 0;
+bool filters_initialized = false;
+
+// Sensor values
+int mq2_raw = 0;
+int mq5_raw = 0;
+int mq2_filtered = 0;
+int mq5_filtered = 0;
+
+// Flame sensor moving average buffers (same style as MQ sensors)
+int flame_readings[FILTER_SIZE];
+int flame_index = 0;
+long flame_total = 0;
+int flame_filtered = 0;
+int flame_raw = 0; // Analog raw value from flame sensor (0..4095)
+
+// (No software debouncing for flame sensor — recommend external pull-down/hardware)
+
+// Detection states
+bool gas_detected = false;
+bool smoke_detected = false;
+bool fire_detected = false;
+
+// Timing variables
+unsigned long last_sensor_read = 0;
+unsigned long last_serial_log = 0;
+unsigned long buzzer_last_change = 0;
+bool buzzer_state = false;
+int buzzer_pulse_count = 0;
+
+// ============================================================================
+// FUNCTION DECLARATIONS
+// ============================================================================
+
+void initializeFilters();
+int updateMovingAverage(int new_reading, int readings[], int &index, long &total);
+void readSensors();
+void updateDetectionStates();
+void controlLEDs();
+void controlBuzzer();
+void serialLog();
+String getSystemStatus();
+
+// ============================================================================
+// SETUP FUNCTION
+// ============================================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("=== Gas Leak and Fire Early Warning System ===");
+  Serial.println("Board: ESP32 DevKit v1");
+  Serial.println("Buzzer Type: PASSIVE (PWM/LEDC for tone generation)");
+  Serial.println("Initializing...");
+  
+  // Configure ADC attenuation for better range (0-3.3V)
+  analogSetPinAttenuation(MQ2_AO_PIN, ADC_11db);
+  analogSetPinAttenuation(MQ5_AO_PIN, ADC_11db);
+  // Configure ADC attenuation for flame sensor (analog input)
+  analogSetPinAttenuation(FLAME_AO_PIN, ADC_11db);
+  
+  // Configure flame sensor pin with internal pull-down
+  pinMode(FLAME_AO_PIN, INPUT_PULLDOWN);
+  
+  // IMPORTANT: For stable flame sensor readings, add external pull-down resistor:
+  // Flame_AO → 10kΩ resistor → GPIO33 → 10kΩ resistor → GND
+  // This helps eliminate floating input and false oscillations.
+
+  // Setup digital pins
+  pinMode(LED_RED_PIN, OUTPUT);
+  pinMode(LED_BLUE_PIN, OUTPUT);
+  pinMode(LED_YELLOW_PIN, OUTPUT);
+  
+  // Initialize LED outputs to OFF
+  digitalWrite(LED_RED_PIN, LOW);
+  digitalWrite(LED_BLUE_PIN, LOW);
+  digitalWrite(LED_YELLOW_PIN, LOW);
+  
+  // --- Setup LEDC for passive buzzer ---
+  // Passive buzzer requires PWM to generate tone
+  ledcSetup(LEDC_CHANNEL, BUZZER_FIRE_FREQ, LEDC_RESOLUTION);
+  ledcAttachPin(BUZZER_PIN, LEDC_CHANNEL);
+  ledcWrite(LEDC_CHANNEL, 0); // Start with buzzer off
+  
+  // Initialize moving average filters
+  initializeFilters();
+  
+  Serial.println("System ready!");
+  Serial.println("IMPORTANT: MQ sensors need 24-48 hours for full stability.");
+  Serial.println("For testing, allow several minutes of warm-up time.");
+  Serial.println("Calibrate thresholds based on clean environment readings.");
+  Serial.println();
+  
+  // Test passive buzzer with different frequencies at startup
+  Serial.println("Testing passive buzzer (different frequencies)...");
+  for (int freq = 800; freq <= 1500; freq += 200) {
+    ledcSetup(LEDC_CHANNEL, freq, LEDC_RESOLUTION);
+    ledcWrite(LEDC_CHANNEL, 128); // 50% duty cycle
+    delay(300);
+  }
+  ledcWrite(LEDC_CHANNEL, 0);   // Off
+  Serial.println("Buzzer test complete. Different tones should have been heard.");
+  Serial.println();
+  
+  // Extended continuous buzzer test: 10 seconds at a single tone (Testing Buzzer)
+  // Use a mid-range frequency (1000 Hz) which is audible for most passive buzzers
+  // Serial.println("Extended buzzer test: continuous tone for 10 seconds...");
+  // ledcSetup(LEDC_CHANNEL, BUZZER_SMOKE_FREQ, LEDC_RESOLUTION);
+  // ledcWrite(LEDC_CHANNEL, 128); // 50% duty
+  // delay(10000); // 10 seconds continuous tone for testing
+  // ledcWrite(LEDC_CHANNEL, 0); // Turn off
+
+  // Test Nyala LED
+  digitalWrite(LED_RED_PIN, HIGH);
+  digitalWrite(LED_BLUE_PIN, HIGH);
+  digitalWrite(LED_YELLOW_PIN, HIGH);
+  delay(3000); // 3 seconds
+
+  Serial.println("Extended buzzer test complete.");
+  Serial.println("Format: Time | MQ2_Raw | MQ2_Avg | MQ5_Raw | MQ5_Avg | Flame | Status");
+  Serial.println("------------------------------------------------------------------------");
+  
+  delay(2000); // Allow sensors to settle
+}
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+
+void loop() {
+  unsigned long current_time = millis();
+  
+  // Read sensors at specified interval
+  if (current_time - last_sensor_read >= SENSOR_READ_INTERVAL) {
+    readSensors();
+    updateDetectionStates();
+    last_sensor_read = current_time;
+  }
+  
+  // Control LEDs and buzzer
+  controlLEDs();
+  controlBuzzer();
+  
+  // Serial logging at specified interval
+  if (current_time - last_serial_log >= SERIAL_LOG_INTERVAL) {
+    serialLog();
+    last_serial_log = current_time;
+  }
+}
+
+// ============================================================================
+// SENSOR FUNCTIONS
+// ============================================================================
+
+void initializeFilters() {
+  // Initialize moving average buffers with current readings
+  int initial_mq2 = analogRead(MQ2_AO_PIN);
+  int initial_mq5 = analogRead(MQ5_AO_PIN);
+  int initial_flame = analogRead(FLAME_AO_PIN);
+  
+  for (int i = 0; i < FILTER_SIZE; i++) {
+    mq2_readings[i] = initial_mq2;
+    mq5_readings[i] = initial_mq5;
+    flame_readings[i] = initial_flame;
+  }
+  
+  mq2_total = initial_mq2 * FILTER_SIZE;
+  mq5_total = initial_mq5 * FILTER_SIZE;
+  flame_total = initial_flame * FILTER_SIZE;
+  mq2_index = 0;
+  mq5_index = 0;
+  flame_index = 0;
+  filters_initialized = true;
+  
+  Serial.print("Filters initialized - MQ2: ");
+  Serial.print(initial_mq2);
+  Serial.print(", MQ5: ");
+  Serial.println(initial_mq5);
+  Serial.print("Flame: ");
+  Serial.println(initial_flame);
+}
+
+int updateMovingAverage(int new_reading, int readings[], int &index, long &total) {
+  // Remove oldest reading from total
+  total = total - readings[index];
+  
+  // Add new reading
+  readings[index] = new_reading;
+  total = total + new_reading;
+  
+  // Advance index with wraparound
+  index = (index + 1) % FILTER_SIZE;
+  
+  // Return filtered average
+  return total / FILTER_SIZE;
+}
+
+void readSensors() {
+  // Read raw analog values
+  mq2_raw = analogRead(MQ2_AO_PIN);
+  mq5_raw = analogRead(MQ5_AO_PIN);
+  flame_raw = analogRead(FLAME_AO_PIN);
+  
+  // DIAGNOSTIC: Check for voltage overload/disconnection
+  if (mq5_raw >= ADC_SATURATION) {
+    Serial.println("WARNING: MQ5 reading near max! Check wiring/voltage divider!");
+  }
+  if (mq2_raw >= ADC_SATURATION) {
+    Serial.println("WARNING: MQ2 reading near max! Check wiring/voltage divider!");
+  }
+  if (flame_raw >= ADC_SATURATION) {
+    Serial.println("WARNING: Flame sensor reading near max! Check wiring/connection!");
+  }
+  
+  // Apply moving average filter
+  if (filters_initialized) {
+    mq2_filtered = updateMovingAverage(mq2_raw, mq2_readings, mq2_index, mq2_total);
+    mq5_filtered = updateMovingAverage(mq5_raw, mq5_readings, mq5_index, mq5_total);
+    flame_filtered = updateMovingAverage(flame_raw, flame_readings, flame_index, flame_total);
+  } else {
+    mq2_filtered = mq2_raw;
+    mq5_filtered = mq5_raw;
+    flame_filtered = flame_raw;
+  }
+}
+
+void updateDetectionStates() {
+  // SAFETY: Ignore readings if sensor is saturated (likely wiring issue)
+  smoke_detected = (mq2_filtered > MQ2_THRESHOLD) && (mq2_raw < ADC_SATURATION);
+  gas_detected = (mq5_filtered > MQ5_THRESHOLD) && (mq5_raw < ADC_SATURATION);
+
+  // Flame detection: LOW = flame detected. Use filtered value for robustness.
+  fire_detected = (flame_filtered < FLAME_THRESHOLD) && (flame_raw < ADC_SATURATION);
+}
+
+// ============================================================================
+// OUTPUT CONTROL FUNCTIONS
+// ============================================================================
+
+void controlLEDs() {
+  // Control LEDs based on detection states
+  digitalWrite(LED_BLUE_PIN, smoke_detected ? HIGH : LOW);
+  digitalWrite(LED_RED_PIN, gas_detected ? HIGH : LOW);
+  digitalWrite(LED_YELLOW_PIN, fire_detected ? HIGH : LOW);
+}
+
+void controlBuzzer() {
+  unsigned long current_time = millis();
+  bool any_hazard = smoke_detected || gas_detected || fire_detected;
+  bool multi_hazard = (smoke_detected + gas_detected + fire_detected) > 1;
+  
+  // Turn off buzzer if no hazards detected
+  if (!any_hazard) {
+    ledcWrite(LEDC_CHANNEL, 0); // Turn off PWM
+    buzzer_state = false;
+    buzzer_pulse_count = 0;
+    return;
+  }
+  
+  // Determine frequency and pattern based on hazard type
+  int frequency = BUZZER_FIRE_FREQ; // Default
+  unsigned long on_time, off_time;
+  
+  if (multi_hazard) {
+    // Multi-hazard: Highest pitch (1500 Hz) with fast pattern
+    frequency = BUZZER_MULTI_FREQ;
+    on_time = BUZZER_MULTI_ON;
+    off_time = BUZZER_MULTI_OFF;
+  } else if (gas_detected) {
+    // Gas: Low pitch (800 Hz) with slow pattern
+    frequency = BUZZER_GAS_FREQ;
+    on_time = BUZZER_GAS_ON;
+    off_time = BUZZER_GAS_OFF;
+  } else if (smoke_detected) {
+    // Smoke: Medium pitch (1000 Hz) with medium pattern
+    frequency = BUZZER_SMOKE_FREQ;
+    on_time = BUZZER_SMOKE_ON;
+    off_time = BUZZER_SMOKE_OFF;
+  } else if (fire_detected) {
+    // Fire: High pitch (1200 Hz) with fast pattern
+    frequency = BUZZER_FIRE_FREQ;
+    on_time = BUZZER_FIRE_ON;
+    off_time = BUZZER_FIRE_OFF;
+  }
+  
+  // Non-blocking on/off pattern with frequency change
+  if (current_time - buzzer_last_change >= (buzzer_state ? on_time : off_time)) {
+    buzzer_state = !buzzer_state;
+    buzzer_last_change = current_time;
+    
+    if (buzzer_state) {
+      // Set frequency and turn on tone
+      ledcSetup(LEDC_CHANNEL, frequency, LEDC_RESOLUTION);
+      ledcWrite(LEDC_CHANNEL, 128); // 50% duty cycle for tone
+    } else {
+      ledcWrite(LEDC_CHANNEL, 0); // Off
+    }
+  }
+}
+
+// ============================================================================
+// LOGGING FUNCTIONS
+// ============================================================================
+
+void serialLog() {
+  // Format: Time | MQ2_Raw | MQ2_Avg | MQ5_Raw | MQ5_Avg | Flame | Status
+  Serial.print(millis() / 1000);
+  Serial.print("s | ");
+  
+  Serial.print("MQ2=");
+  Serial.print(mq2_raw);
+  Serial.print("/");
+  Serial.print(mq2_filtered);
+  Serial.print(" | ");
+  
+  Serial.print("MQ5=");
+  Serial.print(mq5_raw);
+  Serial.print("/");
+  Serial.print(mq5_filtered);
+  Serial.print(" | ");
+
+  Serial.print("Flame=");
+  Serial.print(flame_raw);
+  Serial.print("/");
+  Serial.print(flame_filtered);
+  Serial.print(" | ");
+  
+  // Debug - tampilkan status deteksi
+  Serial.print("Gas=");
+  Serial.print(gas_detected ? "YES" : "NO");
+  Serial.print(",Smoke=");
+  Serial.print(smoke_detected ? "YES" : "NO");
+  Serial.print(",Fire=");
+  Serial.print(fire_detected ? "YES" : "NO");
+  Serial.print(" | ");
+  
+  Serial.println(getSystemStatus());
+}
+
+String getSystemStatus() {
+  if (smoke_detected && gas_detected && fire_detected) {
+    return "CRITICAL: GAS+SMOKE+FIRE";
+  } else if (smoke_detected && gas_detected) {
+    return "DANGER: GAS+SMOKE";
+  } else if (smoke_detected && fire_detected) {
+    return "DANGER: SMOKE+FIRE";
+  } else if (gas_detected && fire_detected) {
+    return "DANGER: GAS+FIRE";
+  } else if (gas_detected) {
+    return "ALERT: GAS DETECTED";
+  } else if (smoke_detected) {
+    return "ALERT: SMOKE DETECTED";
+  } else if (fire_detected) {
+    return "ALERT: FIRE DETECTED";
+  } else {
+    return "OK";
+  }
+}
+
+// ============================================================================
+// CALIBRATION INSTRUCTIONS (in comments)
+// ============================================================================
+
+/*
+ * CALIBRATION PROCEDURE:
+ * 
+ * 1. Place sensors in clean environment (no smoke, gas, or fire)
+ * 2. Let MQ sensors warm up for at least 5-10 minutes (ideally 24-48 hours)
+ * 3. Monitor Serial output and record baseline values for MQ2 and MQ5
+ * 4. Calculate average baseline over several minutes
+ * 5. Set thresholds as: baseline + 20-40% margin
+ *    Example: if MQ2 baseline = 800, set MQ2_THRESHOLD = 800 + (800 * 0.3) = 1040
+ * 6. Test with actual smoke/gas sources to verify detection
+ * 7. Adjust thresholds if needed for sensitivity vs false alarms
+ * 
+ * WIRING NOTES:
+ * - If MQ modules are powered by 5V, use voltage dividers on analog outputs
+ * - Ensure all grounds are connected together
+ * - Use current limiting resistor (220-470Ω) for buzzer if connecting directly to GPIO
+ * - Consider using transistor driver for buzzer for better current handling
+ * 
+ * PASSIVE BUZZER NOTES:
+ * - Passive buzzer requires PWM signal to produce sound (different from active buzzer)
+ * - Uses LEDC (LED PWM Controller) to generate different tone frequencies
+ * - Different frequencies create different tones/alerts for each hazard type:
+ *   • Gas: 800 Hz (lower pitch)
+ *   • Smoke: 1000 Hz (medium pitch)  
+ *   • Fire: 1200 Hz (higher pitch)
+ *   • Multi-hazard: 1500 Hz (highest pitch)
+ * - Duty cycle affects volume (50% = moderate volume)
+ * 
+ * PASSIVE BUZZER WIRING (recommended for reliable operation):
+ * GPIO22 → 1kΩ → Base(NPN), Emitter → GND, Collector → Buzzer(-), Buzzer(+) → 5V
+ * OR for low-current passive buzzer: GPIO22 → Buzzer(+), Buzzer(-) → GND
+ * 
+ * ADC CONFIGURATION:
+ * - ADC_11db attenuation allows 0-3.3V input range
+ * - ADC resolution is 12-bit (0-4095)
+ * - Use ADC1 pins (GPIO32-39) to avoid WiFi interference
+ */

@@ -1,0 +1,18 @@
+# pyproject.toml
+[tool.pylsp-mypy]
+enabled = true
+live_mode = true
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/__pycache__"]
+pythonVersion = "3.12"
+pythonPlatform = "Linux"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.black]
+line-length = 88
+target-version = ['py312']

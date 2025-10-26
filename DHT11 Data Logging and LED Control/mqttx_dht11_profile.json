@@ -1,0 +1,19 @@
+{
+  "name": "DHT11 ESP32 System (HiveMQ)",
+  "host": "broker.hivemq.com",
+  "port": 1883,
+  "protocol": "mqtt",
+  "clientId": "mqttx_dht11_hivemq_1761060778",
+  "username": "",
+  "password": "",
+  "keepAlive": 60,
+  "cleanSession": true,
+  "subscriptions": [
+    {
+      "topic": "sic/dibimbing/catalina/titanio-yudista/pub/dht",
+      "qos": 0,
+      "color": "#4CAF50",
+      "alias": "DHT11 Sensor Data"
+    }
+  ]
+}
