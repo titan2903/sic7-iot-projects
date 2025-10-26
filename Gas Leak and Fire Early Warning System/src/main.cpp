@@ -53,7 +53,7 @@ const int BUZZER_PIN = 22;     // Buzzer output
 // To calibrate: Take readings in clean environment for several minutes,
 // calculate average, then set threshold = average + 20-40% margin
 const int MQ2_THRESHOLD = 700;  // Smoke threshold (calibrated based on clean readings ~700)
-const int MQ5_THRESHOLD = 800;   // Gas threshold (calibrated based on clean readings ~800)
+const int MQ5_THRESHOLD = 750;   // Gas threshold (calibrated based on clean readings ~750)
 
 // ADC saturation threshold: values >= this are considered saturated/invalid
 // Increase this value (up to 4095) to be less aggressive about flagging

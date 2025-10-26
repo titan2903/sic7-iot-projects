@@ -13,7 +13,10 @@ Features:
 """
 
 import dash
-from dash import dcc, html, Input, Output, State, callback_context
+import ssl
+import threading
+from dash import dcc, html, Input, Output, State, callback_context, dash_table
+from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 import plotly.graph_objs as go
 import pandas as pd
@@ -23,6 +26,7 @@ import threading
 from datetime import datetime, timedelta
 from collections import deque
 import os
+import asyncio
 from dotenv import load_dotenv
 
 # MQTT and InfluxDB imports
@@ -92,7 +96,7 @@ except (ValueError, AttributeError):
     )
 
 # Dashboard Configuration
-UPDATE_INTERVAL = 2000  # ms
+UPDATE_INTERVAL = os.getenv("UPDATE_INTERVAL", 3000)  # ms
 MAX_DATA_POINTS = 200
 ALERT_RETENTION_HOURS = 24
 
@@ -108,7 +112,7 @@ alert_history = deque(maxlen=100)
 
 # Device control state
 buzzer_state = "AUTO"
-current_thresholds = {"mq2": 700, "mq5": 800}  # Sync with ESP32 default values
+current_thresholds = {"mq2": 700, "mq5": 750}  # Sync with ESP32 default values
 
 # Initialize clients
 mqtt_client = None
@@ -145,7 +149,6 @@ def write_sensor_data_to_influx(data):
     try:
         write_api = influxdb_client.write_api(write_options=SYNCHRONOUS)
 
-        # Sensor readings point
         point = (
             Point("sensor_readings")
             .tag("device_id", "esp32_001")
@@ -155,12 +158,11 @@ def write_sensor_data_to_influx(data):
             .field("mq5_raw", int(data.get("mq5_raw", 0)))
             .field("mq5_filtered", int(data.get("mq5_filtered", 0)))
             .field("flame_digital", int(data.get("flame", 0)))
-            .time(datetime.now())
         )
 
         write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
 
-        # Detection events point
+        # Detection events point (use auto timestamp for reliability)
         detection_point = (
             Point("detection_events")
             .tag("device_id", "esp32_001")
@@ -168,7 +170,6 @@ def write_sensor_data_to_influx(data):
             .field("gas_detected", bool(data.get("gas_detected", False)))
             .field("smoke_detected", bool(data.get("smoke_detected", False)))
             .field("fire_detected", bool(data.get("fire_detected", False)))
-            .time(datetime.now())
         )
 
         write_api.write(
@@ -192,6 +193,7 @@ def get_historical_data(hours=6):
         |> filter(fn: (r) => r["_measurement"] == "sensor_readings")
         |> filter(fn: (r) => r["_field"] == "mq2_filtered" or r["_field"] == "mq5_filtered")
         |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+        |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
         |> yield(name: "mean")
         """
 
@@ -200,6 +202,96 @@ def get_historical_data(hours=6):
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
         return pd.DataFrame()
+
+
+def get_historical_data_table(time_range="6h"):
+    """Get detailed historical sensor data for table display with CSV export capability"""
+    if not influxdb_client:
+        return pd.DataFrame()
+
+    try:
+        query_api = influxdb_client.query_api()
+
+        # Map time range to hours for query
+        duration_map = {"1h": 1, "6h": 6, "24h": 24}
+
+        hours = duration_map.get(time_range, 6)
+
+        # Use the same measurement name we write to (`sensor_readings`) and the
+        # flame field name (`flame_digital`) used when writing points.
+        query = f"""
+        from(bucket: "{INFLUXDB_BUCKET}")
+        |> range(start: -{hours}h)
+        |> filter(fn: (r) => r["_measurement"] == "sensor_readings")
+        |> filter(fn: (r) => r["_field"] == "mq2_raw" or 
+                           r["_field"] == "mq2_filtered" or 
+                           r["_field"] == "mq5_raw" or 
+                           r["_field"] == "mq5_filtered" or 
+                           r["_field"] == "flame_digital")
+        |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+        |> sort(columns: ["_time"], desc: true)
+        """
+
+        # Execute the Flux query and return a DataFrame directly. Using
+        # query_data_frame is easier to work with than iterating low-level
+        # Flux records — the pivot() in the query will produce wide-form rows
+        # with columns named after the fields (e.g. mq2_raw, mq2_filtered).
+        df_raw = query_api.query_data_frame(query=query, org=INFLUXDB_ORG)
+
+        if df_raw is None or df_raw.empty:
+            return pd.DataFrame()
+
+        # The returned DataFrame may include metadata rows; ensure we have
+        # a proper dataframe with _time and field columns. After pivot, the
+        # timestamp column is named "_time".
+        df = df_raw.copy()
+
+        # Rename _time to time for consistency
+        if "_time" in df.columns:
+            df = df.rename(columns={"_time": "time"})
+
+        # Format timestamp to local time
+        if "time" in df.columns:
+            df["Time"] = pd.to_datetime(df["time"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            df["Time"] = ""
+
+        # Round numeric values and handle NaN (some columns may be missing,
+        # so use .get() with an empty Series fallback)
+        df["MQ2 Raw"] = df.get("mq2_raw", pd.Series()).fillna(0).round(0).astype(int)
+        df["MQ2 Filtered"] = (
+            df.get("mq2_filtered", pd.Series()).fillna(0).round(0).astype(int)
+        )
+        df["MQ5 Raw"] = df.get("mq5_raw", pd.Series()).fillna(0).round(0).astype(int)
+        df["MQ5 Filtered"] = (
+            df.get("mq5_filtered", pd.Series()).fillna(0).round(0).astype(int)
+        )
+
+        # Convert flame status from numeric to text
+        # Map the numeric flame_digital field to a human readable status
+        df["Flame Status"] = (
+            df.get("flame_digital", pd.Series())
+            .fillna(0)
+            .apply(lambda x: "Detected" if x == 1 else "Normal")
+        )
+
+        # Select only the columns we want to display
+        result_df = df[
+            [
+                "Time",
+                "MQ2 Raw",
+                "MQ2 Filtered",
+                "MQ5 Raw",
+                "MQ5 Filtered",
+                "Flame Status",
+            ]
+        ]
+
+        return result_df
+
+    except Exception as e:
+        print(f"Error querying InfluxDB for table: {e}")
+        return pd.DataFrame()  # Return empty DataFrame on error
 
 
 # ============================================================================
@@ -252,8 +344,25 @@ def on_mqtt_message(client, userdata, msg):
             active_alerts.append(alert)
             alert_history.append(alert)
 
-            # Send Telegram notification
-            send_telegram_alert(alert)
+            # Only send Telegram notification if there's actual detection
+            # Check alert_type to determine if this is a valid detection alert
+            alert_type = alert.get("alert_type", "").lower()
+            valid_alert_types = ["gas", "smoke", "fire", "multi"]
+
+            # Check if this is a real detection (not a test or false alert)
+            # Valid alerts should have proper alert_type and meaningful severity
+            severity = alert.get("severity", "").lower()
+            valid_severities = ["danger", "warning", "critical", "alert"]
+
+            if alert_type in valid_alert_types and severity in valid_severities:
+                print(
+                    f"Sending Telegram alert: {alert_type} detected with severity {severity}"
+                )
+                send_telegram_alert(alert)
+            else:
+                print(
+                    f"Skipping Telegram alert - invalid alert type or severity: {alert}"
+                )
 
         elif topic == "home/config/thresholds/ack":
             # Update dashboard threshold state from ESP32 confirmation
@@ -276,8 +385,6 @@ def init_mqtt():
     """Initialize MQTT client"""
     global mqtt_client
     try:
-        import ssl
-
         mqtt_client = mqtt.Client(client_id=MQTT_CLIENT_ID)
         mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
         mqtt_client.on_connect = on_mqtt_connect
@@ -404,7 +511,7 @@ async def telegram_reset_thresholds(update, context: ContextTypes.DEFAULT_TYPE):
             "🔄 Threshold reset command sent to ESP32\n"
             "Default values:\n"
             "🌬️ MQ-2 (Smoke): 700\n"
-            "⛽ MQ-5 (Gas): 800"
+            "⛽ MQ-5 (Gas): 750"
         )
     else:
         await update.message.reply_text("❌ Failed to send reset command")
@@ -422,30 +529,32 @@ async def telegram_history(update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Process data for summary
+        # Process data for summary (after pivot, data is in direct columns)
         history_text = "📈 Last 1 Hour Summary:\n\n"
 
-        # Get MQ2 data
-        mq2_data = df[df["_field"] == "mq2_filtered"]
-        if not mq2_data.empty:
-            mq2_avg = mq2_data["_value"].mean()
-            mq2_max = mq2_data["_value"].max()
-            mq2_min = mq2_data["_value"].min()
-            history_text += f"🌬️ MQ-2 (Smoke):\n"
-            history_text += f"   • Average: {mq2_avg:.1f}\n"
-            history_text += f"   • Max: {mq2_max:.1f}\n"
-            history_text += f"   • Min: {mq2_min:.1f}\n\n"
+        # Get MQ2 data (after pivot, data is directly in mq2_filtered column)
+        if "mq2_filtered" in df.columns:
+            mq2_values = df["mq2_filtered"].dropna()
+            if not mq2_values.empty:
+                mq2_avg = mq2_values.mean()
+                mq2_max = mq2_values.max()
+                mq2_min = mq2_values.min()
+                history_text += f"🌬️ MQ-2 (Smoke):\n"
+                history_text += f"   • Average: {mq2_avg:.1f}\n"
+                history_text += f"   • Max: {mq2_max:.1f}\n"
+                history_text += f"   • Min: {mq2_min:.1f}\n\n"
 
-        # Get MQ5 data
-        mq5_data = df[df["_field"] == "mq5_filtered"]
-        if not mq5_data.empty:
-            mq5_avg = mq5_data["_value"].mean()
-            mq5_max = mq5_data["_value"].max()
-            mq5_min = mq5_data["_value"].min()
-            history_text += f"⛽ MQ-5 (Gas):\n"
-            history_text += f"   • Average: {mq5_avg:.1f}\n"
-            history_text += f"   • Max: {mq5_max:.1f}\n"
-            history_text += f"   • Min: {mq5_min:.1f}\n\n"
+        # Get MQ5 data (after pivot, data is directly in mq5_filtered column)
+        if "mq5_filtered" in df.columns:
+            mq5_values = df["mq5_filtered"].dropna()
+            if not mq5_values.empty:
+                mq5_avg = mq5_values.mean()
+                mq5_max = mq5_values.max()
+                mq5_min = mq5_values.min()
+                history_text += f"⛽ MQ-5 (Gas):\n"
+                history_text += f"   • Average: {mq5_avg:.1f}\n"
+                history_text += f"   • Max: {mq5_max:.1f}\n"
+                history_text += f"   • Min: {mq5_min:.1f}\n\n"
 
         # Add alert summary from last hour
         current_time = datetime.now()
@@ -495,10 +604,27 @@ def send_telegram_alert(alert):
     # Send to all configured chat IDs (personal and groups)
     for chat_id in TELEGRAM_CHAT_IDS:
         try:
-            # Send message in background thread
-            asyncio.create_task(
-                telegram_bot.send_message(chat_id=chat_id, text=message)
-            )
+            # Use a thread-safe approach to send telegram messages
+            def send_async_message():
+                try:
+                    # Create a new event loop for this thread if one doesn't exist
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+
+                    # Run the coroutine
+                    loop.run_until_complete(
+                        telegram_bot.send_message(chat_id=chat_id, text=message)
+                    )
+                except Exception as e:
+                    print(f"Failed to send Telegram alert to chat {chat_id}: {e}")
+
+            # Run in a separate thread to avoid blocking
+            telegram_thread = threading.Thread(target=send_async_message, daemon=True)
+            telegram_thread.start()
+
         except Exception as e:
             print(f"Failed to send Telegram alert to chat {chat_id}: {e}")
 
@@ -870,14 +996,82 @@ def create_layout():
                     ),
                 ]
             ),
+            # Interactive Data Table Section
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            dbc.Card(
+                                [
+                                    dbc.CardHeader(
+                                        [
+                                            html.Div(
+                                                [
+                                                    html.H5(
+                                                        "Sensor Data Table",
+                                                        className="mb-0",
+                                                        style={
+                                                            "display": "inline-block"
+                                                        },
+                                                    ),
+                                                    dbc.ButtonGroup(
+                                                        [
+                                                            dbc.Button(
+                                                                "Last 1H",
+                                                                id="table-1h-btn",
+                                                                color="outline-secondary",
+                                                                size="sm",
+                                                            ),
+                                                            dbc.Button(
+                                                                "Last 6H",
+                                                                id="table-6h-btn",
+                                                                color="secondary",
+                                                                size="sm",
+                                                            ),
+                                                            dbc.Button(
+                                                                "Last 24H",
+                                                                id="table-24h-btn",
+                                                                color="outline-secondary",
+                                                                size="sm",
+                                                            ),
+                                                        ],
+                                                        className="me-2",
+                                                    ),
+                                                    dbc.Button(
+                                                        "Download CSV",
+                                                        id="download-csv-btn",
+                                                        color="success",
+                                                        size="sm",
+                                                    ),
+                                                ],
+                                                className="d-flex justify-content-between align-items-center",
+                                            )
+                                        ]
+                                    ),
+                                    dbc.CardBody(
+                                        [
+                                            html.Div(id="data-table-container"),
+                                        ]
+                                    ),
+                                ]
+                            )
+                        ],
+                        md=12,
+                    ),
+                ],
+                className="mb-4",
+            ),
             # Auto-refresh component
             dcc.Interval(
                 id="interval-component", interval=UPDATE_INTERVAL, n_intervals=0
             ),
+            # Download component for CSV export
+            dcc.Download(id="download-csv-component"),
             # Hidden divs for storing data
             html.Div(
                 id="historical-timeframe", children="6", style={"display": "none"}
             ),
+            html.Div(id="table-timeframe", children="6h", style={"display": "none"}),
         ],
         fluid=True,
     )
@@ -1075,23 +1269,30 @@ def update_historical_chart(btn1, btn6, btn24, n, current_timeframe):
 
     fig = go.Figure()
 
-    # Process InfluxDB data
+    # Process InfluxDB data (after pivot, columns are directly available)
     if "_time" in df.columns:
-        for field in ["mq2_filtered", "mq5_filtered"]:
-            field_data = df[df["_field"] == field]
-            if not field_data.empty:
-                color = "blue" if field == "mq2_filtered" else "orange"
-                name = "MQ-2 (Smoke)" if field == "mq2_filtered" else "MQ-5 (Gas)"
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=field_data["_time"],
-                        y=field_data["_value"],
-                        mode="lines",
-                        name=name,
-                        line=dict(color=color, width=2),
-                    )
+        # After pivot(), sensor data is in direct columns
+        if "mq2_filtered" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["_time"],
+                    y=df["mq2_filtered"],
+                    mode="lines",
+                    name="MQ-2 (Smoke)",
+                    line=dict(color="blue", width=2),
                 )
+            )
+
+        if "mq5_filtered" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["_time"],
+                    y=df["mq5_filtered"],
+                    mode="lines",
+                    name="MQ-5 (Gas)",
+                    line=dict(color="orange", width=2),
+                )
+            )
 
     fig.update_layout(
         title=f"Historical Data ({timeframe}H)",
@@ -1149,6 +1350,201 @@ def update_alerts_list(n):
         )
 
     return alerts_components
+
+
+# Separate callbacks for table timeframe and data updates to preserve pagination
+@app.callback(
+    Output("table-timeframe", "children"),
+    [
+        Input("table-1h-btn", "n_clicks"),
+        Input("table-6h-btn", "n_clicks"),
+        Input("table-24h-btn", "n_clicks"),
+    ],
+    [State("table-timeframe", "children")],
+    prevent_initial_call=False,
+)
+def update_table_timeframe(n_clicks_1h, n_clicks_6h, n_clicks_24h, current_timeframe):
+    """Update table timeframe when buttons are clicked"""
+    ctx = dash.callback_context
+    time_range = current_timeframe or "6h"  # Use current or default
+
+    # Check if triggered by button clicks
+    if ctx.triggered:
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger_id == "table-1h-btn":
+            time_range = "1h"
+        elif trigger_id == "table-6h-btn":
+            time_range = "6h"
+        elif trigger_id == "table-24h-btn":
+            time_range = "24h"
+
+    return time_range
+
+
+@app.callback(
+    Output("data-table-container", "children"),
+    [
+        Input("table-timeframe", "children"),
+        Input("interval-component", "n_intervals"),  # Update data periodically
+    ],
+    prevent_initial_call=False,
+)
+def update_table_data(time_range, n_intervals):
+    """Update table data while preserving pagination state"""
+    ctx = dash.callback_context
+
+    # If triggered by interval and table already exists, only update data without recreating table
+    if (
+        ctx.triggered
+        and ctx.triggered[0]["prop_id"] == "interval-component.n_intervals"
+    ):
+        # Check if we have existing table - if so, only update its data
+        # This approach preserves pagination state
+        pass
+
+    time_range = time_range or "6h"
+
+    # Get data for table
+    try:
+        df = get_historical_data_table(time_range)
+
+        if df.empty:
+            table_content = html.Div(
+                "No data available for the selected time range.",
+                className="text-center text-muted p-3",
+            )
+        else:
+            # Create data table
+            table_content = dash_table.DataTable(
+                id="sensor-data-table",
+                data=df.to_dict("records"),
+                columns=[
+                    {"name": "Time", "id": "Time", "type": "text"},
+                    {
+                        "name": "MQ2 Raw",
+                        "id": "MQ2 Raw",
+                        "type": "numeric",
+                        "format": {"specifier": ".0f"},
+                    },
+                    {
+                        "name": "MQ2 Filtered",
+                        "id": "MQ2 Filtered",
+                        "type": "numeric",
+                        "format": {"specifier": ".0f"},
+                    },
+                    {
+                        "name": "MQ5 Raw",
+                        "id": "MQ5 Raw",
+                        "type": "numeric",
+                        "format": {"specifier": ".0f"},
+                    },
+                    {
+                        "name": "MQ5 Filtered",
+                        "id": "MQ5 Filtered",
+                        "type": "numeric",
+                        "format": {"specifier": ".0f"},
+                    },
+                    {"name": "Flame Status", "id": "Flame Status", "type": "text"},
+                ],
+                style_table={
+                    "overflowX": "auto",
+                    "maxHeight": "400px",
+                    "overflowY": "auto",
+                },
+                style_cell={
+                    "textAlign": "left",
+                    "padding": "10px",
+                    "fontFamily": "Arial",
+                    "fontSize": "14px",
+                },
+                style_header={
+                    "backgroundColor": "#007bff",
+                    "color": "white",
+                    "fontWeight": "bold",
+                    "textAlign": "center",
+                },
+                style_data={
+                    "backgroundColor": "#f8f9fa",
+                    "color": "black",
+                },
+                style_data_conditional=[
+                    {
+                        "if": {"filter_query": "{Flame Status} = Detected"},
+                        "backgroundColor": "#f8d7da",
+                        "color": "black",
+                    },
+                ],
+                page_size=20,
+                sort_action="native",
+                filter_action="native",
+                export_format="csv",
+                persistence=True,  # Enable persistence to maintain pagination state
+                persistence_type="session",  # Use session storage
+            )
+
+    except Exception as e:
+        print(f"Error updating data table: {e}")
+        table_content = html.Div(
+            "Error loading data table.", className="text-center text-danger p-3"
+        )
+
+    return table_content
+
+
+# CSV Download callback - simplified
+@app.callback(
+    Output("download-csv-component", "data"),
+    [Input("download-csv-btn", "n_clicks")],
+    [State("table-timeframe", "children")],
+    prevent_initial_call=True,
+)
+def download_csv_data(n_clicks, time_range):
+    """Handle actual CSV download"""
+    if n_clicks:
+        try:
+            # Get data for current timeframe
+            df = get_historical_data_table(time_range or "6h")
+
+            if not df.empty:
+                # Generate timestamp for filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"sensor_data_{time_range}_{timestamp}.csv"
+
+                return dict(content=df.to_csv(index=False), filename=filename)
+
+        except Exception as e:
+            print(f"Error downloading CSV: {e}")
+            return dash.no_update
+
+    return dash.no_update
+
+
+# Callback to update only table data without resetting pagination
+@app.callback(
+    Output("sensor-data-table", "data"),
+    [Input("interval-component", "n_intervals")],
+    [State("table-timeframe", "children")],
+    prevent_initial_call=True,
+)
+def update_table_data_only(n_intervals, time_range):
+    """Update only table data to preserve pagination state"""
+    try:
+        # Only update every 30 seconds to reduce load and avoid interrupting user interaction
+        if (
+            n_intervals % 10 != 0
+        ):  # Update every 10th interval (30 seconds if interval is 3s)
+            raise PreventUpdate
+
+        time_range = time_range or "6h"
+        df = get_historical_data_table(time_range)
+
+        if df.empty:
+            raise PreventUpdate
+
+        return df.to_dict("records")
+    except Exception as e:
+        print(f"Error updating table data: {e}")
+        raise PreventUpdate
 
 
 # Buzzer control callbacks
@@ -1211,7 +1607,7 @@ def reset_thresholds(n_clicks):
         # Update local threshold values to defaults
         global current_thresholds
         current_thresholds["mq2"] = 700  # Default ESP32 values
-        current_thresholds["mq5"] = 800  # Default ESP32 values
+        current_thresholds["mq5"] = 750  # Default ESP32 values
     return False
 
 
@@ -1231,7 +1627,7 @@ def update_threshold_sliders(reset_clicks, n_intervals):
 
         # If reset button was clicked, set to default values
         if trigger_id == "reset-thresholds-btn" and reset_clicks:
-            return 700, 800  # Default ESP32 values
+            return 700, 750  # Default ESP32 values
 
     # Otherwise return current threshold values (updated from ESP32)
     return current_thresholds["mq2"], current_thresholds["mq5"]
@@ -1256,6 +1652,45 @@ def update_timeframe(btn1, btn6, btn24):
         elif button_id == "hist-24h-btn":
             return "24"
     return "6"
+
+
+# Update historical buttons' colors based on selected timeframe
+@app.callback(
+    [
+        Output("hist-1h-btn", "color"),
+        Output("hist-6h-btn", "color"),
+        Output("hist-24h-btn", "color"),
+    ],
+    [Input("historical-timeframe", "children")],
+)
+def update_hist_button_colors(timeframe):
+    # Active style: primary; inactive: outline-primary
+    if timeframe == "1":
+        return "primary", "outline-primary", "outline-primary"
+    elif timeframe == "24":
+        return "outline-primary", "outline-primary", "primary"
+    # default: 6
+    return "outline-primary", "primary", "outline-primary"
+
+
+# Update table buttons' colors when clicked
+@app.callback(
+    [
+        Output("table-1h-btn", "color"),
+        Output("table-6h-btn", "color"),
+        Output("table-24h-btn", "color"),
+    ],
+    [Input("table-timeframe", "children")],
+)
+def update_table_button_colors(timeframe):
+    """Update table button colors based on selected timeframe"""
+    # Active style: secondary; inactive: outline-secondary
+    if timeframe == "1h":
+        return "secondary", "outline-secondary", "outline-secondary"
+    elif timeframe == "24h":
+        return "outline-secondary", "outline-secondary", "secondary"
+    # default: 6h
+    return "outline-secondary", "secondary", "outline-secondary"
 
 
 # ============================================================================
