@@ -93,11 +93,11 @@ const unsigned long WIFI_RECONNECT_INTERVAL = 30000; // 30 seconds
 const unsigned long WIFI_TIMEOUT = 20000; // 20 seconds connection timeout
 
 // MQTT Configuration
-const char* MQTT_SERVER = "103.127.97.247";
-const int MQTT_PORT = 1883;
+const char* MQTT_SERVER = "ab36ea92cee24b64acda14d3001e34d4.s1.eu.hivemq.cloud";
+const int MQTT_PORT = 8883;
 const char* MQTT_USERNAME = "cakrawala_mqtt";
-const char* MQTT_PASSWORD = "Jarvis5413$";
-const char* MQTT_CLIENT_ID = "esp32_warning_sensor_001";
+const char* MQTT_PASSWORD = "vXtbU7m2DjTxBSLN";
+const char* MQTT_CLIENT_ID = "esp32_warning_siragas";
 
 // MQTT Topics
 const char* TOPIC_SENSOR_DATA = "home/sensors/data";

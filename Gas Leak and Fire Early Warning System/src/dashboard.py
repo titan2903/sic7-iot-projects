@@ -49,11 +49,13 @@ DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 DASHBOARD_PORT = os.getenv("DASHBOARD_PORT", 8050)
 
 # MQTT Configuration
-MQTT_BROKER = os.getenv("MQTT_BROKER", "103.127.97.247")
-MQTT_PORT = os.getenv("MQTT_PORT", 1883)
+MQTT_BROKER = os.getenv(
+    "MQTT_BROKER", "ab36ea92cee24b64acda14d3001e34d4.s1.eu.hivemq.cloud"
+)
+MQTT_PORT = os.getenv("MQTT_PORT", 8883)
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "cakrawala_mqtt")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "Jarvis5413$")
-MQTT_CLIENT_ID = "dashboard_client_001"
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "vXtbU7m2DjTxBSLN")
+MQTT_CLIENT_ID = "dashboard_client_siragas"
 
 # MQTT Topics
 TOPIC_SENSOR_DATA = "home/sensors/data"
@@ -256,11 +258,19 @@ def init_mqtt():
     """Initialize MQTT client"""
     global mqtt_client
     try:
+        import ssl
+        
         mqtt_client = mqtt.Client(client_id=MQTT_CLIENT_ID)
         mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
         mqtt_client.on_connect = on_mqtt_connect
         mqtt_client.on_message = on_mqtt_message
-        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        
+        # Configure TLS for HiveMQ Cloud (port 8883)
+        if int(MQTT_PORT) == 8883:
+            context = ssl.create_default_context()
+            mqtt_client.tls_set_context(context)
+        
+        mqtt_client.connect(MQTT_BROKER, int(MQTT_PORT), 60)
 
         # Start MQTT loop in background thread
         mqtt_client.loop_start()
@@ -401,6 +411,9 @@ def init_telegram():
         # Start bot in background thread
         def run_telegram():
             asyncio.set_event_loop(asyncio.new_event_loop())
+            loop = asyncio.get_event_loop()
+            # Initialize the app before running
+            loop.run_until_complete(telegram_app.initialize())
             # Disable signal handling to avoid set_wakeup_fd error in non-main thread
             telegram_app.run_polling(stop_signals=None)
 
