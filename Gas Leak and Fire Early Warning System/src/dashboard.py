@@ -108,7 +108,7 @@ alert_history = deque(maxlen=100)
 
 # Device control state
 buzzer_state = "AUTO"
-current_thresholds = {"mq2": 350, "mq5": 600}
+current_thresholds = {"mq2": 700, "mq5": 800}  # Sync with ESP32 default values
 
 # Initialize clients
 mqtt_client = None
@@ -214,6 +214,13 @@ def on_mqtt_connect(client, userdata, flags, rc):
         client.subscribe(TOPIC_SENSOR_DATA, qos=1)
         client.subscribe(TOPIC_SENSOR_STATUS, qos=1)
         client.subscribe(TOPIC_SENSOR_ALERTS, qos=1)
+        client.subscribe(
+            "home/config/thresholds/ack", qos=1
+        )  # Subscribe to threshold confirmations
+
+        # Request current thresholds from ESP32 on connection
+        client.publish("home/commands/get_thresholds", "REQUEST", qos=1)
+        print("Requested current thresholds from ESP32")
     else:
         print(f"Failed to connect to MQTT broker: {rc}")
 
@@ -247,6 +254,17 @@ def on_mqtt_message(client, userdata, msg):
 
             # Send Telegram notification
             send_telegram_alert(alert)
+
+        elif topic == "home/config/thresholds/ack":
+            # Update dashboard threshold state from ESP32 confirmation
+            global current_thresholds
+            if "mq2_threshold" in payload:
+                current_thresholds["mq2"] = payload["mq2_threshold"]
+            if "mq5_threshold" in payload:
+                current_thresholds["mq5"] = payload["mq5_threshold"]
+            print(
+                f"Dashboard thresholds updated from ESP32: MQ2={current_thresholds['mq2']}, MQ5={current_thresholds['mq5']}"
+            )
 
         print(f"MQTT [{topic}]: {payload}")
 
@@ -305,6 +323,7 @@ async def telegram_start(update, context: ContextTypes.DEFAULT_TYPE):
         "/off - Turn buzzer OFF\n"
         "/auto - Set buzzer to AUTO mode\n"
         "/thresholds - Show current thresholds\n"
+        "/reset - Reset thresholds to default values\n"
         "/history - Show last 1 hour data summary\n"
         "/help - Show this help message"
     )
@@ -376,6 +395,19 @@ async def telegram_thresholds(update, context: ContextTypes.DEFAULT_TYPE):
         thresholds_text += f"⛽ MQ-5: {latest_data.get('mq5_filtered', 'N/A')}"
 
     await update.message.reply_text(thresholds_text)
+
+
+async def telegram_reset_thresholds(update, context: ContextTypes.DEFAULT_TYPE):
+    """Telegram /reset command - reset thresholds to default values"""
+    if publish_mqtt_command("home/commands/reset_thresholds", "RESET"):
+        await update.message.reply_text(
+            "🔄 Threshold reset command sent to ESP32\n"
+            "Default values:\n"
+            "🌬️ MQ-2 (Smoke): 700\n"
+            "⛽ MQ-5 (Gas): 800"
+        )
+    else:
+        await update.message.reply_text("❌ Failed to send reset command")
 
 
 async def telegram_history(update, context: ContextTypes.DEFAULT_TYPE):
@@ -490,6 +522,7 @@ def init_telegram():
         telegram_app.add_handler(CommandHandler("off", telegram_buzzer_off))
         telegram_app.add_handler(CommandHandler("auto", telegram_buzzer_auto))
         telegram_app.add_handler(CommandHandler("thresholds", telegram_thresholds))
+        telegram_app.add_handler(CommandHandler("reset", telegram_reset_thresholds))
         telegram_app.add_handler(CommandHandler("history", telegram_history))
 
         # Start bot in background thread
@@ -728,13 +761,13 @@ def create_layout():
                                             html.P("MQ-2 (Smoke):", className="mb-1"),
                                             dcc.Slider(
                                                 id="mq2-threshold-slider",
-                                                min=100,
-                                                max=1000,
+                                                min=600,
+                                                max=2000,
                                                 step=50,
-                                                value=350,
+                                                value=1300,
                                                 marks={
                                                     i: str(i)
-                                                    for i in range(100, 1001, 200)
+                                                    for i in range(600, 2001, 300)
                                                 },
                                                 tooltip={
                                                     "placement": "bottom",
@@ -746,13 +779,13 @@ def create_layout():
                                             ),
                                             dcc.Slider(
                                                 id="mq5-threshold-slider",
-                                                min=200,
+                                                min=500,
                                                 max=1500,
                                                 step=50,
-                                                value=600,
+                                                value=950,
                                                 marks={
                                                     i: str(i)
-                                                    for i in range(200, 1501, 300)
+                                                    for i in range(500, 1501, 200)
                                                 },
                                                 tooltip={
                                                     "placement": "bottom",
@@ -763,6 +796,13 @@ def create_layout():
                                                 "Update Thresholds",
                                                 id="update-thresholds-btn",
                                                 color="primary",
+                                                size="sm",
+                                                className="mt-3 me-2",
+                                            ),
+                                            dbc.Button(
+                                                "Reset to Default",
+                                                id="reset-thresholds-btn",
+                                                color="warning",
                                                 size="sm",
                                                 className="mt-3",
                                             ),
@@ -1157,6 +1197,44 @@ def update_thresholds(n_clicks, mq2_val, mq5_val):
         current_thresholds["mq2"] = mq2_val
         current_thresholds["mq5"] = mq5_val
     return False
+
+
+@app.callback(
+    Output("reset-thresholds-btn", "disabled"),
+    [Input("reset-thresholds-btn", "n_clicks")],
+)
+def reset_thresholds(n_clicks):
+    if n_clicks:
+        # Send reset command to ESP32
+        publish_mqtt_command("home/commands/reset_thresholds", "RESET")
+
+        # Update local threshold values to defaults
+        global current_thresholds
+        current_thresholds["mq2"] = 700  # Default ESP32 values
+        current_thresholds["mq5"] = 800  # Default ESP32 values
+    return False
+
+
+@app.callback(
+    [Output("mq2-threshold-slider", "value"), Output("mq5-threshold-slider", "value")],
+    [
+        Input("reset-thresholds-btn", "n_clicks"),
+        Input("interval-component", "n_intervals"),
+    ],
+)
+def update_threshold_sliders(reset_clicks, n_intervals):
+    """Update threshold sliders when reset is clicked or ESP32 sends new values"""
+    ctx = callback_context
+
+    if ctx.triggered:
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
+        # If reset button was clicked, set to default values
+        if trigger_id == "reset-thresholds-btn" and reset_clicks:
+            return 700, 800  # Default ESP32 values
+
+    # Otherwise return current threshold values (updated from ESP32)
+    return current_thresholds["mq2"], current_thresholds["mq5"]
 
 
 @app.callback(

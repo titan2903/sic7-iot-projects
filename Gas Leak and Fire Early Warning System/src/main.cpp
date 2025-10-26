@@ -52,8 +52,8 @@ const int BUZZER_PIN = 22;     // Buzzer output
 // These are scaled estimates for ESP32 ADC (0..4095)
 // To calibrate: Take readings in clean environment for several minutes,
 // calculate average, then set threshold = average + 20-40% margin
-const int MQ2_THRESHOLD = 1300;  // Smoke threshold (calibrated based on clean readings ~1100)
-const int MQ5_THRESHOLD = 950;   // Gas threshold (calibrated based on clean readings ~850)
+const int MQ2_THRESHOLD = 700;  // Smoke threshold (calibrated based on clean readings ~700)
+const int MQ5_THRESHOLD = 800;   // Gas threshold (calibrated based on clean readings ~800)
 
 // ADC saturation threshold: values >= this are considered saturated/invalid
 // Increase this value (up to 4095) to be less aggressive about flagging
@@ -255,9 +255,13 @@ void setup() {
   configurable_mq5_threshold = preferences.getInt("mq5_threshold", MQ5_THRESHOLD);
   preferences.end();
   
-  Serial.print("Loaded MQ2 threshold: ");
-  Serial.println(configurable_mq2_threshold);
-  Serial.print("Loaded MQ5 threshold: ");
+  Serial.print("Default thresholds - MQ2: ");
+  Serial.print(MQ2_THRESHOLD);
+  Serial.print(", MQ5: ");
+  Serial.println(MQ5_THRESHOLD);
+  Serial.print("Loaded from NVS - MQ2: ");
+  Serial.print(configurable_mq2_threshold);
+  Serial.print(", MQ5: ");
   Serial.println(configurable_mq5_threshold);
   
   // Initialize WiFi
@@ -722,6 +726,50 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
   
+  // Handle threshold request command
+  else if (String(topic) == "home/commands/get_thresholds") {
+    if (message == "REQUEST") {
+      // Send current thresholds to dashboard
+      StaticJsonDocument<200> ack;
+      ack["mq2_threshold"] = configurable_mq2_threshold;
+      ack["mq5_threshold"] = configurable_mq5_threshold;
+      ack["status"] = "current";
+      String ackPayload;
+      serializeJson(ack, ackPayload);
+      mqttClient.publish("home/config/thresholds/ack", ackPayload.c_str(), true);
+      Serial.println("Sent current thresholds to dashboard");
+    }
+  }
+  
+  // Handle threshold reset command
+  else if (String(topic) == "home/commands/reset_thresholds") {
+    if (message == "RESET") {
+      // Reset thresholds to default values
+      configurable_mq2_threshold = MQ2_THRESHOLD;
+      configurable_mq5_threshold = MQ5_THRESHOLD;
+      
+      // Save to NVS
+      preferences.begin("settings", false);
+      preferences.putInt("mq2_threshold", configurable_mq2_threshold);
+      preferences.putInt("mq5_threshold", configurable_mq5_threshold);
+      preferences.end();
+      
+      // Send acknowledgment
+      StaticJsonDocument<200> ack;
+      ack["mq2_threshold"] = configurable_mq2_threshold;
+      ack["mq5_threshold"] = configurable_mq5_threshold;
+      ack["status"] = "reset_to_default";
+      String ackPayload;
+      serializeJson(ack, ackPayload);
+      mqttClient.publish("home/config/thresholds/ack", ackPayload.c_str(), true);
+      
+      Serial.print("Thresholds reset to default - MQ2: ");
+      Serial.print(configurable_mq2_threshold);
+      Serial.print(", MQ5: ");
+      Serial.println(configurable_mq5_threshold);
+    }
+  }
+  
   // Handle threshold configuration
   else if (String(topic) == TOPIC_CONFIG_THRESHOLDS) {
     StaticJsonDocument<200> doc;
@@ -779,6 +827,8 @@ void reconnectMQTT() {
       mqttClient.subscribe(TOPIC_CMD_CALIBRATE, 1);
       mqttClient.subscribe(TOPIC_CONFIG_THRESHOLDS, 1);
       mqttClient.subscribe(TOPIC_CONFIG_INTERVALS, 1);
+      mqttClient.subscribe("home/commands/get_thresholds", 1);
+      mqttClient.subscribe("home/commands/reset_thresholds", 1);
       
       Serial.println("Subscribed to command topics");
       
