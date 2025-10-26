@@ -35,7 +35,7 @@
 // Pin definitions
 const int MQ2_AO_PIN = 34;     // Smoke sensor (ADC1 channel) - connect to AO (Analog Output)
 const int MQ5_AO_PIN = 35;     // LPG gas sensor (ADC1 channel) - connect to AO (Analog Output)
-const int FLAME_AO_PIN = 33;   // Flame sensor (ADC1, analog) - connect to AO (Analog Output)
+const int FLAME_DO_PIN = 25;   // Flame sensor (digital) - connect to DO (Digital Output)
 const int LED_RED_PIN = 5;     // Gas detection LED
 const int LED_BLUE_PIN = 2;    // Smoke detection LED  
 const int LED_YELLOW_PIN = 4;  // Fire detection LED
@@ -44,20 +44,14 @@ const int BUZZER_PIN = 22;     // Buzzer output
 // Thresholds (CALIBRATION REQUIRED!)
 // These are scaled estimates for ESP32 ADC (0..4095)
 // To calibrate: Take readings in clean environment for several minutes,
-// calculate average, then set threshold = average + 20-40% margin
+// calculate average, then set threshold = average + 20-40% margi
 const int MQ2_THRESHOLD = 350;  // Smoke threshold (increased for safety and false alarms)
-const int MQ5_THRESHOLD = 800;  // Gas threshold (increased for safety and false alarms)
+const int MQ5_THRESHOLD = 600;  // Gas threshold (increased for safety and false alarms)
 
-// Flame sensor threshold (CALIBRATION REQUIRED!)
-// Flame sensors typically pull voltage LOW when flame is detected. Set this
-// threshold by measuring the analog value in a clean environment and choose
-// a margin. Value is 0..4095 (12-bit ADC)
-// Increased threshold to avoid false positives from floating/unstable input
-const int FLAME_THRESHOLD = 1024;
 // ADC saturation threshold: values >= this are considered saturated/invalid
 // Increase this value (up to 4095) to be less aggressive about flagging
 // saturation. Decrease it to flag saturation earlier (more conservative).
-const int ADC_SATURATION = 4096;
+const int ADC_SATURATION = 4095;
  
 // Timing intervals
 const unsigned long SENSOR_READ_INTERVAL = 500;  // Read sensors every 500ms
@@ -101,12 +95,8 @@ int mq5_raw = 0;
 int mq2_filtered = 0;
 int mq5_filtered = 0;
 
-// Flame sensor moving average buffers (same style as MQ sensors)
-int flame_readings[FILTER_SIZE];
-int flame_index = 0;
-long flame_total = 0;
-int flame_filtered = 0;
-int flame_raw = 0; // Analog raw value from flame sensor (0..4095)
+// Digital flame sensor value
+bool flame_digital = false; // Digital value from flame sensor DO pin (HIGH=no flame, LOW=flame detected)
 
 // (No software debouncing for flame sensor — recommend external pull-down/hardware)
 
@@ -150,16 +140,10 @@ void setup() {
   // Configure ADC attenuation for better range (0-3.3V)
   analogSetPinAttenuation(MQ2_AO_PIN, ADC_11db);
   analogSetPinAttenuation(MQ5_AO_PIN, ADC_11db);
-  // Configure ADC attenuation for flame sensor (analog input)
-  analogSetPinAttenuation(FLAME_AO_PIN, ADC_11db);
   
-  // Configure flame sensor pin with internal pull-down
-  pinMode(FLAME_AO_PIN, INPUT_PULLDOWN);
+  // Configure digital flame sensor input
+  pinMode(FLAME_DO_PIN, INPUT);
   
-  // IMPORTANT: For stable flame sensor readings, add external pull-down resistor:
-  // Flame_AO → 10kΩ resistor → GPIO33 → 10kΩ resistor → GND
-  // This helps eliminate floating input and false oscillations.
-
   // Setup digital pins
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(LED_BLUE_PIN, OUTPUT);
@@ -211,8 +195,8 @@ void setup() {
   delay(3000); // 3 seconds
 
   Serial.println("Extended buzzer test complete.");
-  Serial.println("Format: Time | MQ2_Raw | MQ2_Avg | MQ5_Raw | MQ5_Avg | Flame | Status");
-  Serial.println("------------------------------------------------------------------------");
+  Serial.println("Format: Time | MQ2_Raw/Avg | MQ5_Raw/Avg | Flame_DO | Status");
+  Serial.println("------------------------------------------------------------------");
   
   delay(2000); // Allow sensors to settle
 }
@@ -250,28 +234,22 @@ void initializeFilters() {
   // Initialize moving average buffers with current readings
   int initial_mq2 = analogRead(MQ2_AO_PIN);
   int initial_mq5 = analogRead(MQ5_AO_PIN);
-  int initial_flame = analogRead(FLAME_AO_PIN);
   
   for (int i = 0; i < FILTER_SIZE; i++) {
     mq2_readings[i] = initial_mq2;
     mq5_readings[i] = initial_mq5;
-    flame_readings[i] = initial_flame;
   }
   
   mq2_total = initial_mq2 * FILTER_SIZE;
   mq5_total = initial_mq5 * FILTER_SIZE;
-  flame_total = initial_flame * FILTER_SIZE;
   mq2_index = 0;
   mq5_index = 0;
-  flame_index = 0;
   filters_initialized = true;
   
   Serial.print("Filters initialized - MQ2: ");
   Serial.print(initial_mq2);
   Serial.print(", MQ5: ");
   Serial.println(initial_mq5);
-  Serial.print("Flame: ");
-  Serial.println(initial_flame);
 }
 
 int updateMovingAverage(int new_reading, int readings[], int &index, long &total) {
@@ -293,7 +271,9 @@ void readSensors() {
   // Read raw analog values
   mq2_raw = analogRead(MQ2_AO_PIN);
   mq5_raw = analogRead(MQ5_AO_PIN);
-  flame_raw = analogRead(FLAME_AO_PIN);
+  
+  // Read digital flame sensor
+  flame_digital = digitalRead(FLAME_DO_PIN);
   
   // DIAGNOSTIC: Check for voltage overload/disconnection
   if (mq5_raw >= ADC_SATURATION) {
@@ -302,19 +282,14 @@ void readSensors() {
   if (mq2_raw >= ADC_SATURATION) {
     Serial.println("WARNING: MQ2 reading near max! Check wiring/voltage divider!");
   }
-  if (flame_raw >= ADC_SATURATION) {
-    Serial.println("WARNING: Flame sensor reading near max! Check wiring/connection!");
-  }
   
   // Apply moving average filter
   if (filters_initialized) {
     mq2_filtered = updateMovingAverage(mq2_raw, mq2_readings, mq2_index, mq2_total);
     mq5_filtered = updateMovingAverage(mq5_raw, mq5_readings, mq5_index, mq5_total);
-    flame_filtered = updateMovingAverage(flame_raw, flame_readings, flame_index, flame_total);
   } else {
     mq2_filtered = mq2_raw;
     mq5_filtered = mq5_raw;
-    flame_filtered = flame_raw;
   }
 }
 
@@ -323,8 +298,9 @@ void updateDetectionStates() {
   smoke_detected = (mq2_filtered > MQ2_THRESHOLD) && (mq2_raw < ADC_SATURATION);
   gas_detected = (mq5_filtered > MQ5_THRESHOLD) && (mq5_raw < ADC_SATURATION);
 
-  // Flame detection: LOW = flame detected. Use filtered value for robustness.
-  fire_detected = (flame_filtered < FLAME_THRESHOLD) && (flame_raw < ADC_SATURATION);
+  // Flame detection: Use digital DO pin (LOW = flame detected, HIGH = no flame)
+  // Keep analog reading for debugging purposes
+  fire_detected = !flame_digital; // Inverted: LOW on DO means flame detected
 }
 
 // ============================================================================
@@ -414,12 +390,12 @@ void serialLog() {
   Serial.print(" | ");
 
   Serial.print("Flame=");
-  Serial.print(flame_raw);
-  Serial.print("/");
-  Serial.print(flame_filtered);
-  Serial.print(" | ");
+  Serial.print(fire_detected ? 1 : 0);
+  Serial.print(" ");
+  Serial.print("(DO=");
+  Serial.print(flame_digital ? "HIGH" : "LOW");
+  Serial.print(") | ");
   
-  // Debug - tampilkan status deteksi
   Serial.print("Gas=");
   Serial.print(gas_detected ? "YES" : "NO");
   Serial.print(",Smoke=");
