@@ -50,9 +50,9 @@ const int BUZZER_PIN = 22;     // Buzzer output
 // Thresholds (CALIBRATION REQUIRED!)
 // These are scaled estimates for ESP32 ADC (0..4095)
 // To calibrate: Take readings in clean environment for several minutes,
-// calculate average, then set threshold = average + 20-40% margi
-const int MQ2_THRESHOLD = 350;  // Smoke threshold (increased for safety and false alarms)
-const int MQ5_THRESHOLD = 600;  // Gas threshold (increased for safety and false alarms)
+// calculate average, then set threshold = average + 20-40% margin
+const int MQ2_THRESHOLD = 1300;  // Smoke threshold (calibrated based on clean readings ~1100)
+const int MQ5_THRESHOLD = 950;   // Gas threshold (calibrated based on clean readings ~850)
 
 // ADC saturation threshold: values >= this are considered saturated/invalid
 // Increase this value (up to 4095) to be less aggressive about flagging
