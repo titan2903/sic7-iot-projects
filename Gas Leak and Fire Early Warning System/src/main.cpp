@@ -27,6 +27,12 @@
  */
 
 #include <Arduino.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <ESP32Time.h>
+#include <ArduinoOTA.h>
 
 // ============================================================================
 // CONFIGURATION - Adjust these values according to your setup and calibration
@@ -77,6 +83,42 @@ const int BUZZER_MULTI_FREQ = 1500;  // Multi-hazard frequency (Hz)
 const int FILTER_SIZE = 5;
 
 // ============================================================================
+// WIFI & MQTT CONFIGURATION
+// ============================================================================
+
+// WiFi Configuration
+const char* WIFI_SSID = "kosasi kost lt 2";
+const char* WIFI_PASSWORD = "kosasikost2";
+const unsigned long WIFI_RECONNECT_INTERVAL = 30000; // 30 seconds
+const unsigned long WIFI_TIMEOUT = 20000; // 20 seconds connection timeout
+
+// MQTT Configuration
+const char* MQTT_SERVER = "103.127.97.247";
+const int MQTT_PORT = 1883;
+const char* MQTT_USERNAME = "cakrawala_mqtt";
+const char* MQTT_PASSWORD = "Jarvis5413$";
+const char* MQTT_CLIENT_ID = "esp32_warning_sensor_001";
+
+// MQTT Topics
+const char* TOPIC_SENSOR_DATA = "home/sensors/data";
+const char* TOPIC_SENSOR_STATUS = "home/sensors/status";
+const char* TOPIC_SENSOR_ALERTS = "home/sensors/alerts";
+const char* TOPIC_CMD_BUZZER = "home/commands/buzzer";
+const char* TOPIC_CMD_CALIBRATE = "home/commands/calibrate";
+const char* TOPIC_CONFIG_THRESHOLDS = "home/config/thresholds";
+const char* TOPIC_CONFIG_INTERVALS = "home/config/intervals";
+
+// NTP Configuration
+const char* NTP_SERVER = "pool.ntp.org";
+const long GMT_OFFSET_SEC = 7 * 3600; // UTC+7 (WIB)
+const int DAYLIGHT_OFFSET_SEC = 0;
+
+// Timing intervals for MQTT and WiFi
+const unsigned long MQTT_PUBLISH_INTERVAL = 5000;   // Publish data every 5 seconds
+const unsigned long MQTT_STATUS_INTERVAL = 30000;   // Publish status every 30 seconds
+const unsigned long WIFI_CHECK_INTERVAL = 10000;    // Check WiFi every 10 seconds
+
+// ============================================================================
 // GLOBAL VARIABLES
 // ============================================================================
 
@@ -113,6 +155,33 @@ bool buzzer_state = false;
 int buzzer_pulse_count = 0;
 
 // ============================================================================
+// WIFI & MQTT GLOBAL VARIABLES
+// ============================================================================
+
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
+Preferences preferences;
+ESP32Time rtc;
+
+// Network status variables
+bool wifi_connected = false;
+bool mqtt_connected = false;
+unsigned long last_wifi_check = 0;
+unsigned long last_mqtt_publish = 0;
+unsigned long last_mqtt_status = 0;
+unsigned long wifi_reconnect_attempts = 0;
+int wifi_rssi = 0;
+
+// Remote control variables
+bool remote_buzzer_override = false;
+bool remote_buzzer_state = false;
+bool calibration_requested = false;
+
+// Configurable thresholds (can be updated via MQTT)
+int configurable_mq2_threshold = MQ2_THRESHOLD;
+int configurable_mq5_threshold = MQ5_THRESHOLD;
+
+// ============================================================================
 // FUNCTION DECLARATIONS
 // ============================================================================
 
@@ -124,6 +193,20 @@ void controlLEDs();
 void controlBuzzer();
 void serialLog();
 String getSystemStatus();
+
+// WiFi & MQTT Functions
+void initWiFi();
+void checkWiFiConnection();
+void initMQTT();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
+void reconnectMQTT();
+void publishSensorData();
+void publishStatus();
+void publishAlert(String alertType, String severity);
+void handleMQTTCommands();
+void initNTP();
+void initOTA();
+unsigned long getEpochTime();
 
 // ============================================================================
 // SETUP FUNCTION
@@ -163,10 +246,23 @@ void setup() {
   // Initialize moving average filters
   initializeFilters();
   
+  // Initialize WiFi
+  initWiFi();
+  
+  // Initialize MQTT
+  initMQTT();
+  
+  // Initialize NTP
+  initNTP();
+  
+  // Initialize OTA
+  initOTA();
+  
   Serial.println("System ready!");
   Serial.println("IMPORTANT: MQ sensors need 24-48 hours for full stability.");
   Serial.println("For testing, allow several minutes of warm-up time.");
   Serial.println("Calibrate thresholds based on clean environment readings.");
+  Serial.println("WiFi and MQTT integration enabled.");
   Serial.println();
   
   // Test passive buzzer with different frequencies at startup
@@ -208,6 +304,20 @@ void setup() {
 void loop() {
   unsigned long current_time = millis();
   
+  // Handle OTA updates
+  ArduinoOTA.handle();
+  
+  // Check WiFi connection
+  checkWiFiConnection();
+  
+  // Handle MQTT
+  if (wifi_connected) {
+    if (!mqttClient.connected()) {
+      reconnectMQTT();
+    }
+    mqttClient.loop();
+  }
+  
   // Read sensors at specified interval
   if (current_time - last_sensor_read >= SENSOR_READ_INTERVAL) {
     readSensors();
@@ -218,6 +328,18 @@ void loop() {
   // Control LEDs and buzzer
   controlLEDs();
   controlBuzzer();
+  
+  // Publish sensor data via MQTT
+  if (wifi_connected && mqtt_connected && current_time - last_mqtt_publish >= MQTT_PUBLISH_INTERVAL) {
+    publishSensorData();
+    last_mqtt_publish = current_time;
+  }
+  
+  // Publish status via MQTT
+  if (wifi_connected && mqtt_connected && current_time - last_mqtt_status >= MQTT_STATUS_INTERVAL) {
+    publishStatus();
+    last_mqtt_status = current_time;
+  }
   
   // Serial logging at specified interval
   if (current_time - last_serial_log >= SERIAL_LOG_INTERVAL) {
@@ -294,13 +416,36 @@ void readSensors() {
 }
 
 void updateDetectionStates() {
+  // Store previous states for alert detection
+  bool prev_smoke = smoke_detected;
+  bool prev_gas = gas_detected;
+  bool prev_fire = fire_detected;
+  
   // SAFETY: Ignore readings if sensor is saturated (likely wiring issue)
-  smoke_detected = (mq2_filtered > MQ2_THRESHOLD) && (mq2_raw < ADC_SATURATION);
-  gas_detected = (mq5_filtered > MQ5_THRESHOLD) && (mq5_raw < ADC_SATURATION);
+  smoke_detected = (mq2_filtered > configurable_mq2_threshold) && (mq2_raw < ADC_SATURATION);
+  gas_detected = (mq5_filtered > configurable_mq5_threshold) && (mq5_raw < ADC_SATURATION);
 
   // Flame detection: Use digital DO pin (LOW = flame detected, HIGH = no flame)
-  // Keep analog reading for debugging purposes
   fire_detected = !flame_digital; // Inverted: LOW on DO means flame detected
+  
+  // Publish alerts for new detections
+  if (wifi_connected && mqtt_connected) {
+    if (smoke_detected && !prev_smoke) {
+      publishAlert("smoke", fire_detected || gas_detected ? "critical" : "alert");
+    }
+    if (gas_detected && !prev_gas) {
+      publishAlert("gas", fire_detected || smoke_detected ? "critical" : "alert");
+    }
+    if (fire_detected && !prev_fire) {
+      publishAlert("fire", smoke_detected || gas_detected ? "critical" : "danger");
+    }
+    
+    // Multi-hazard alert
+    int hazard_count = (smoke_detected ? 1 : 0) + (gas_detected ? 1 : 0) + (fire_detected ? 1 : 0);
+    if (hazard_count >= 2 && (prev_smoke + prev_gas + prev_fire) < 2) {
+      publishAlert("multi", "critical");
+    }
+  }
 }
 
 // ============================================================================
@@ -316,6 +461,18 @@ void controlLEDs() {
 
 void controlBuzzer() {
   unsigned long current_time = millis();
+  
+  // Handle remote buzzer override
+  if (remote_buzzer_override) {
+    if (remote_buzzer_state) {
+      ledcSetup(LEDC_CHANNEL, BUZZER_SMOKE_FREQ, LEDC_RESOLUTION);
+      ledcWrite(LEDC_CHANNEL, 128); // 50% duty cycle
+    } else {
+      ledcWrite(LEDC_CHANNEL, 0); // Off
+    }
+    return;
+  }
+  
   bool any_hazard = smoke_detected || gas_detected || fire_detected;
   bool multi_hazard = (smoke_detected + gas_detected + fire_detected) > 1;
   
@@ -329,7 +486,8 @@ void controlBuzzer() {
   
   // Determine frequency and pattern based on hazard type
   int frequency = BUZZER_FIRE_FREQ; // Default
-  unsigned long on_time, off_time;
+  unsigned long on_time = BUZZER_FIRE_ON; // Default initialization
+  unsigned long off_time = BUZZER_FIRE_OFF; // Default initialization
   
   if (multi_hazard) {
     // Multi-hazard: Highest pitch (1500 Hz) with fast pattern
@@ -426,6 +584,282 @@ String getSystemStatus() {
   } else {
     return "OK";
   }
+}
+
+// ============================================================================
+// WIFI & MQTT FUNCTIONS
+// ============================================================================
+
+void initWiFi() {
+  Serial.println("Initializing WiFi...");
+  
+  // Initialize preferences for credential storage
+  preferences.begin("wifi_creds", false);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  Serial.print("Connecting to WiFi");
+  unsigned long start_time = millis();
+  
+  while (WiFi.status() != WL_CONNECTED && millis() - start_time < WIFI_TIMEOUT) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    wifi_connected = true;
+    wifi_rssi = WiFi.RSSI();
+    Serial.println();
+    Serial.println("WiFi connected!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Signal strength (RSSI): ");
+    Serial.print(wifi_rssi);
+    Serial.println(" dBm");
+  } else {
+    wifi_connected = false;
+    Serial.println();
+    Serial.println("WiFi connection failed!");
+  }
+}
+
+void checkWiFiConnection() {
+  unsigned long current_time = millis();
+  
+  if (current_time - last_wifi_check >= WIFI_CHECK_INTERVAL) {
+    last_wifi_check = current_time;
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      if (wifi_connected) {
+        Serial.println("WiFi disconnected! Attempting to reconnect...");
+        wifi_connected = false;
+        mqtt_connected = false;
+      }
+      
+      WiFi.reconnect();
+      wifi_reconnect_attempts++;
+    } else {
+      if (!wifi_connected) {
+        Serial.println("WiFi reconnected!");
+        wifi_connected = true;
+        wifi_rssi = WiFi.RSSI();
+      }
+      wifi_rssi = WiFi.RSSI();
+    }
+  }
+}
+
+void initMQTT() {
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  
+  if (wifi_connected) {
+    reconnectMQTT();
+  }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String message = "";
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  
+  Serial.print("MQTT message received [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(message);
+  
+  // Handle buzzer commands
+  if (String(topic) == TOPIC_CMD_BUZZER) {
+    if (message == "ON") {
+      remote_buzzer_override = true;
+      remote_buzzer_state = true;
+      Serial.println("Remote buzzer: ON");
+    } else if (message == "OFF") {
+      remote_buzzer_override = true;
+      remote_buzzer_state = false;
+      Serial.println("Remote buzzer: OFF");
+    } else if (message == "AUTO") {
+      remote_buzzer_override = false;
+      Serial.println("Remote buzzer: AUTO");
+    }
+  }
+  
+  // Handle calibration commands
+  else if (String(topic) == TOPIC_CMD_CALIBRATE) {
+    if (message == "START") {
+      calibration_requested = true;
+      Serial.println("Calibration requested via MQTT");
+    }
+  }
+  
+  // Handle threshold configuration
+  else if (String(topic) == TOPIC_CONFIG_THRESHOLDS) {
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, message);
+    
+    if (!error) {
+      if (doc.containsKey("mq2_threshold")) {
+        configurable_mq2_threshold = doc["mq2_threshold"];
+        Serial.print("MQ2 threshold updated: ");
+        Serial.println(configurable_mq2_threshold);
+      }
+      if (doc.containsKey("mq5_threshold")) {
+        configurable_mq5_threshold = doc["mq5_threshold"];
+        Serial.print("MQ5 threshold updated: ");
+        Serial.println(configurable_mq5_threshold);
+      }
+    }
+  }
+}
+
+void reconnectMQTT() {
+  if (!wifi_connected) return;
+  
+  if (!mqttClient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    
+    if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD)) {
+      Serial.println(" connected!");
+      mqtt_connected = true;
+      
+      // Subscribe to command topics
+      mqttClient.subscribe(TOPIC_CMD_BUZZER, 1);
+      mqttClient.subscribe(TOPIC_CMD_CALIBRATE, 1);
+      mqttClient.subscribe(TOPIC_CONFIG_THRESHOLDS, 1);
+      mqttClient.subscribe(TOPIC_CONFIG_INTERVALS, 1);
+      
+      Serial.println("Subscribed to command topics");
+      
+      // Publish online status
+      publishStatus();
+      
+    } else {
+      mqtt_connected = false;
+      Serial.print(" failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" retrying in 5 seconds");
+    }
+  }
+}
+
+void publishSensorData() {
+  if (!mqtt_connected) return;
+  
+  StaticJsonDocument<300> doc;
+  doc["mq2_raw"] = mq2_raw;
+  doc["mq2_filtered"] = mq2_filtered;
+  doc["mq5_raw"] = mq5_raw;
+  doc["mq5_filtered"] = mq5_filtered;
+  doc["flame"] = fire_detected ? 1 : 0;
+  doc["gas_detected"] = gas_detected ? 1 : 0;
+  doc["smoke_detected"] = smoke_detected ? 1 : 0;
+  doc["fire_detected"] = fire_detected ? 1 : 0;
+  doc["timestamp"] = getEpochTime();
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  mqttClient.publish(TOPIC_SENSOR_DATA, payload.c_str(), true);
+}
+
+void publishStatus() {
+  if (!mqtt_connected) return;
+  
+  StaticJsonDocument<200> doc;
+  doc["device_id"] = MQTT_CLIENT_ID;
+  doc["online"] = true;
+  doc["uptime"] = millis() / 1000;
+  doc["free_heap"] = ESP.getFreeHeap();
+  doc["wifi_rssi"] = wifi_rssi;
+  doc["wifi_reconnects"] = wifi_reconnect_attempts;
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  mqttClient.publish(TOPIC_SENSOR_STATUS, payload.c_str(), true);
+}
+
+void publishAlert(String alertType, String severity) {
+  if (!mqtt_connected) return;
+  
+  StaticJsonDocument<200> doc;
+  doc["alert_type"] = alertType;
+  doc["severity"] = severity;
+  doc["timestamp"] = getEpochTime();
+  doc["device_id"] = MQTT_CLIENT_ID;
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  mqttClient.publish(TOPIC_SENSOR_ALERTS, payload.c_str(), true);
+}
+
+void initNTP() {
+  if (!wifi_connected) return;
+  
+  Serial.println("Initializing NTP...");
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+  
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    Serial.println("NTP time synchronized");
+    rtc.setTimeStruct(timeinfo);
+  } else {
+    Serial.println("Failed to obtain time from NTP");
+  }
+}
+
+void initOTA() {
+  if (!wifi_connected) return;
+  
+  ArduinoOTA.setHostname("ESP32-Gas-Monitor");
+  ArduinoOTA.setPassword("gas_monitor_ota");
+  
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else {
+      type = "filesystem";
+    }
+    Serial.println("Start updating " + type);
+  });
+  
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+  
+  ArduinoOTA.begin();
+  Serial.println("OTA Ready");
+}
+
+unsigned long getEpochTime() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    return mktime(&timeinfo);
+  }
+  return millis() / 1000; // Fallback to relative time
 }
 
 // ============================================================================

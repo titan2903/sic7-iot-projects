@@ -154,13 +154,12 @@
 - Device authentication dan authorization
 - Input validation untuk MQTT commands dan web inputs
 
-## Deployment Architecture:
+
+## Network Topology:
 ```
-ESP32 Device → MQTT Broker → Python Dashboard Service
-                    ↓
-               InfluxDB Database
-                    ↓
-              Telegram Bot API
+ESP32 → WiFi → MQTT Broker → Python Dashboard
+                    ↓              ↓
+              Telegram Bot ← InfluxDB Database
 ```
 
 ## File Structure:

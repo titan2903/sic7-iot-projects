@@ -1,0 +1,67 @@
+{
+  "system": {
+    "name": "Gas Leak and Fire Early Warning System",
+    "version": "1.0.0",
+    "description": "IoT-based early warning system for gas leaks, smoke, and fire detection"
+  },
+  "mqtt": {
+    "broker": "103.127.97.247",
+    "port": 1883,
+    "username": "cakrawala_mqtt",
+    "password": "Jarvis5413$",
+    "client_id": "esp32_warning_sensor_001",
+    "qos": 1,
+    "retain": true
+  },
+  "influxdb": {
+    "url": "http://localhost:8086",
+    "organization": "gas_monitoring_org",
+    "bucket": "sensor_data",
+    "token": "gas-monitoring-super-secret-token"
+  },
+  "sensors": {
+    "mq2": {
+      "name": "Smoke Sensor",
+      "type": "MQ-2",
+      "pin": 34,
+      "threshold": 350,
+      "unit": "ppm"
+    },
+    "mq5": {
+      "name": "Gas Sensor", 
+      "type": "MQ-5",
+      "pin": 35,
+      "threshold": 600,
+      "unit": "ppm"
+    },
+    "flame": {
+      "name": "Flame Sensor",
+      "type": "Digital",
+      "pin": 25,
+      "threshold": 0,
+      "unit": "boolean"
+    }
+  },
+  "alerts": {
+    "levels": {
+      "ok": 0,
+      "alert": 1,
+      "danger": 2,
+      "critical": 3
+    },
+    "retention_hours": 24,
+    "telegram_notifications": true,
+    "silent_hours": {
+      "enabled": false,
+      "start": "22:00",
+      "end": "06:00"
+    }
+  },
+  "dashboard": {
+    "update_interval_ms": 2000,
+    "max_data_points": 200,
+    "host": "0.0.0.0",
+    "port": 8050,
+    "theme": "bootstrap"
+  }
+}

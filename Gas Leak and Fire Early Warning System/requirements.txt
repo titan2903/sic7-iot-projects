@@ -1,0 +1,17 @@
+# Dashboard and Web Framework
+dash==2.14.1
+dash-bootstrap-components==1.5.0
+plotly==5.17.0
+
+# MQTT Client
+paho-mqtt==1.6.1
+
+# InfluxDB Client
+influxdb-client==1.38.0
+
+# Telegram Bot
+python-telegram-bot==20.6
+
+# Additional utilities
+python-dotenv==1.0.0
+pandas==2.1.3
