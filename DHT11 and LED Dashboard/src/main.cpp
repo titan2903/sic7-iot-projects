@@ -88,19 +88,18 @@ void reconnect()
 
     if (client.connect(clientId.c_str(), mqtt_username, mqtt_password))
     {
+      // Once connected, publish an announcement...
+      client.publish(temp_humidity_topic, "ESP32 connected");
     }
     else
     {
       // subscribe to control topic
       client.subscribe(led_control_topic);
     }
-    if (!client.connected())
-    {
-      // keep failure info
-      Serial.print("MQTT connect failed, rc=");
-      Serial.println(client.state());
-      delay(5000);
-    }
+    // keep failure info
+    Serial.print("MQTT connect failed, rc=");
+    Serial.println(client.state());
+    delay(5000);
   }
 }
 
