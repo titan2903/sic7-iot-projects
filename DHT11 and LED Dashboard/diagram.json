@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "author": "Titanio Yudista",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-breadboard-half", "id": "bb2", "top": 6.6, "left": -83.6, "attrs": {} },
+    {
+      "type": "board-esp32-devkit-c-v4",
+      "id": "esp",
+      "top": 8.46,
+      "left": 582.5,
+      "rotate": 270,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r2",
+      "top": -178.45,
+      "left": 230.4,
+      "attrs": { "value": "1" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led3",
+      "top": -291.6,
+      "left": 176.6,
+      "attrs": { "color": "red" }
+    },
+    { "type": "wokwi-dht22", "id": "dht1", "top": -239.7, "left": 52.2, "attrs": {} }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "r2:1", "led3:A", "green", [ "v0" ] ],
+    [ "r2:2", "esp:2", "green", [ "v0" ] ],
+    [ "esp:GND.2", "bb2:bn.25", "black", [ "v0" ] ],
+    [ "esp:3V3", "bb2:bp.25", "red", [ "v0" ] ],
+    [ "led3:C", "bb2:bn.20", "black", [ "v0" ] ],
+    [ "dht1:GND", "bb2:bn.17", "black", [ "v0" ] ],
+    [ "dht1:VCC", "bb2:bp.13", "red", [ "v0" ] ],
+    [ "dht1:SDA", "esp:4", "violet", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}
