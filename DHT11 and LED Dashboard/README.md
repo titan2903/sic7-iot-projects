@@ -1,12 +1,12 @@
 # DHT11 dan LED Dashboard
 
 Proyek ini terdiri dari dua bagian:
-1. **Arduino ESP32** - Membaca sensor DHT11 dan mengontrol LED via MQTT
+1. **ESP32 DevKit V1** - Membaca sensor DHT11 dan mengontrol LED via MQTT
 2. **Dashboard Python** - Monitoring dan kontrol melalui web interface
 
 ## Hardware Requirements
 
-### Arduino ESP32:
+### ESP32 DevKit V1:
 - ESP32 Development Board
 - DHT11 Temperature & Humidity Sensor
 - LED
@@ -26,7 +26,7 @@ LED:
 - Cathode (-) → GND (melalui resistor 220Ω)
 ```
 
-## Setup Arduino
+## Setup ESP32 DevKit V1
 
 ### 1. Install PlatformIO
 Pastikan PlatformIO sudah terinstall di VS Code.
@@ -92,7 +92,7 @@ Gunakan MQTT client seperti MQTT Explorer untuk test koneksi.
 
 ## Fitur
 
-### Arduino ESP32:
+### ESP32 DevKit V1:
 - ✅ Membaca sensor DHT11 setiap 5 detik
 - ✅ Publish data suhu & kelembaban ke MQTT
 - ✅ Subscribe untuk kontrol LED
@@ -153,7 +153,7 @@ Gunakan MQTT client seperti MQTT Explorer untuk test koneksi.
 ## File Structure
 ```
 ├── src/
-│   ├── main.cpp          # Arduino code
+│   ├── main.cpp          # ESP32 DevKit V1 code
 │   └── dashboard.py      # Python dashboard
 ├── platformio.ini        # PlatformIO config
 ├── requirements.txt      # Python dependencies
@@ -162,7 +162,7 @@ Gunakan MQTT client seperti MQTT Explorer untuk test koneksi.
 
 ## Libraries Used
 
-### Arduino:
+### ESP32 DevKit V1:
 - WiFi (ESP32 built-in)
 - PubSubClient (MQTT)
 - DHT sensor library

@@ -44,11 +44,11 @@ mqtt_client = mqtt.Client()
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
-        print("Connected to MQTT Broker!")
+        # successfully connected; subscribe to topic (no noisy logs)
         client.subscribe(TEMP_HUMIDITY_TOPIC)
-        print(f"Subscribed to {TEMP_HUMIDITY_TOPIC}")
     else:
-        print(f"Failed to connect, return code {rc}")
+        # keep error log for connection failures
+        print(f"MQTT connect failed, rc={rc}")
 
 
 def on_message(client, userdata, msg):
@@ -63,12 +63,10 @@ def on_message(client, userdata, msg):
             humidity = data["humidity"]
             timestamp = datetime.now()
 
-            # Store data
+            # Store data (no debug prints to keep logs clean)
             temperature_data.append(temperature)
             humidity_data.append(humidity)
             timestamps.append(timestamp)
-
-            print(f"Received - Temp: {temperature}°C, Humidity: {humidity}%")
 
     except Exception as e:
         print(f"Error processing message: {e}")
@@ -93,9 +91,8 @@ def setup_mqtt():
         # Connect to broker
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 
-        # Start loop in separate thread
+        # Start loop in separate thread (silent)
         mqtt_client.loop_start()
-        print("MQTT client started")
 
     except Exception as e:
         print(f"Error setting up MQTT: {e}")
@@ -108,9 +105,7 @@ def publish_led_command(command):
         result = mqtt_client.publish(LED_CONTROL_TOPIC, payload)
         if result.rc == 0:
             led_state["status"] = command
-            print(f"LED command sent: {command}")
-        else:
-            print(f"Failed to send LED command: {command}")
+        # do not print success/failure to avoid noisy logs; exceptions will still be shown
     except Exception as e:
         print(f"Error publishing LED command: {e}")
 
@@ -800,6 +795,5 @@ def update_charts(n):
 
 
 if __name__ == "__main__":
-    print("Starting DHT11 Dashboard...")
-    print("Dashboard will be available at: http://127.0.0.1:8050")
+    # Start the Dash app (run quietly)
     app.run(debug=True, host="0.0.0.0", port=8050)
