@@ -42,13 +42,24 @@ warnings.filterwarnings(
 mqtt_client = mqtt.Client()
 
 
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
-        # successfully connected; subscribe to topic (no noisy logs)
-        client.subscribe(TEMP_HUMIDITY_TOPIC)
-    else:
-        # keep error log for connection failures
-        print(f"MQTT connect failed, rc={rc}")
+def on_connect(client, userdata, *args, **kwargs):
+    try:
+        # args[0] -> flags, args[1] -> rc (if present)
+        if len(args) >= 2:
+            rc = args[1]
+        else:
+            # Fallback if args are missing; treat as error
+            rc = 1
+
+        if rc == 0:
+            # successfully connected; subscribe to topic (no noisy logs)
+            client.subscribe(TEMP_HUMIDITY_TOPIC)
+        else:
+            # keep error log for connection failures
+            print(f"MQTT connect failed, rc={rc}")
+    except Exception as e:
+        # Defensive: log unexpected callback signature problems
+        print(f"on_connect handler error: {e}")
 
 
 def on_message(client, userdata, msg):
@@ -117,7 +128,9 @@ setup_mqtt()
 app = dash.Dash(__name__)
 
 # Custom CSS for better styling
-external_stylesheets = ['https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap']
+external_stylesheets = [
+    "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+]
 app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 
 # Modern CSS styling with proper container
@@ -157,212 +170,215 @@ app.layout = html.Div(
                 "boxShadow": "0 4px 20px rgba(0,0,0,0.1)",
             },
         ),
-        
         # Content Container
         html.Div(
             className="container",
             children=[
-        
-        # Status & LED Control Section
-        html.Div(
-            className="control-section",
-            children=[
-                # Device Control Card
+                # Status & LED Control Section
                 html.Div(
-                    className="control-card",
+                    className="control-section",
                     children=[
-                        html.H3(
-                            "� Device Control",
-                            style={
-                                "color": "#2c3e50",
-                                "marginBottom": "20px",
-                                "fontSize": "1.4rem",
-                                "fontWeight": "500",
-                                "textAlign": "center",
-                            },
-                        ),
+                        # Device Control Card
                         html.Div(
-                            className="button-group",
+                            className="control-card",
                             children=[
-                                html.Button(
-                                    "💡 Turn ON",
-                                    id="led-on-btn",
-                                    n_clicks=0,
-                                    className="btn btn-success",
+                                html.H3(
+                                    "� Device Control",
+                                    style={
+                                        "color": "#2c3e50",
+                                        "marginBottom": "20px",
+                                        "fontSize": "1.4rem",
+                                        "fontWeight": "500",
+                                        "textAlign": "center",
+                                    },
                                 ),
-                                html.Button(
-                                    "💡 Turn OFF",
-                                    id="led-off-btn",
-                                    n_clicks=0,
-                                    className="btn btn-danger",
+                                html.Div(
+                                    className="button-group",
+                                    children=[
+                                        html.Button(
+                                            "💡 Turn ON",
+                                            id="led-on-btn",
+                                            n_clicks=0,
+                                            className="btn btn-success",
+                                        ),
+                                        html.Button(
+                                            "💡 Turn OFF",
+                                            id="led-off-btn",
+                                            n_clicks=0,
+                                            className="btn btn-danger",
+                                        ),
+                                    ],
+                                ),
+                                html.Div(
+                                    id="led-status",
+                                    className="status-display",
+                                    children="LED Status: OFF",
                                 ),
                             ],
                         ),
+                        # Export Controls Card
                         html.Div(
-                            id="led-status",
-                            className="status-display",
-                            children="LED Status: OFF",
+                            className="export-card",
+                            children=[
+                                html.H3(
+                                    "📊 Data Export",
+                                    style={
+                                        "color": "#2c3e50",
+                                        "marginBottom": "20px",
+                                        "fontSize": "1.4rem",
+                                        "fontWeight": "500",
+                                        "textAlign": "center",
+                                    },
+                                ),
+                                html.P(
+                                    "Total Records: 0",
+                                    id="record-count",
+                                    className="record-count",
+                                ),
+                                html.Button(
+                                    "📥 Download CSV",
+                                    id="download-btn",
+                                    n_clicks=0,
+                                    className="btn btn-primary btn-full",
+                                ),
+                                dcc.Download(id="download-dataframe-csv"),
+                            ],
                         ),
                     ],
                 ),
-                
-                # Export Controls Card
+                # Current Values Section
                 html.Div(
-                    className="export-card",
+                    className="readings-section",
                     children=[
                         html.H3(
-                            "📊 Data Export",
-                            style={
-                                "color": "#2c3e50",
-                                "marginBottom": "20px",
-                                "fontSize": "1.4rem",
-                                "fontWeight": "500",
-                                "textAlign": "center",
-                            },
+                            "📈 Live Readings",
+                            className="section-title",
                         ),
+                        html.Div(
+                            className="readings-grid",
+                            children=[
+                                # Temperature Card
+                                html.Div(
+                                    className="reading-card temp-card",
+                                    children=[
+                                        html.Div("🌡️", className="card-icon"),
+                                        html.H2(
+                                            id="current-temp",
+                                            children="--°C",
+                                            className="reading-value temp-value",
+                                        ),
+                                        html.P(
+                                            "Temperature", className="reading-label"
+                                        ),
+                                    ],
+                                ),
+                                # Humidity Card
+                                html.Div(
+                                    className="reading-card humidity-card",
+                                    children=[
+                                        html.Div("💧", className="card-icon"),
+                                        html.H2(
+                                            id="current-humidity",
+                                            children="--%",
+                                            className="reading-value humidity-value",
+                                        ),
+                                        html.P("Humidity", className="reading-label"),
+                                    ],
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                # Charts Section
+                html.Div(
+                    className="charts-section",
+                    children=[
+                        html.H3("📊 Historical Charts", className="section-title"),
+                        dcc.Graph(id="temperature-chart", className="chart"),
+                        dcc.Graph(id="humidity-chart", className="chart"),
+                    ],
+                ),
+                # Data Table Section
+                html.Div(
+                    className="table-section",
+                    children=[
+                        html.H3("📋 Historical Data Table", className="section-title"),
+                        dash_table.DataTable(
+                            id="data-table",
+                            columns=[
+                                {"name": "Time", "id": "timestamp", "type": "datetime"},
+                                {
+                                    "name": "Temperature (°C)",
+                                    "id": "temperature",
+                                    "type": "numeric",
+                                    "format": {"specifier": ".1f"},
+                                },
+                                {
+                                    "name": "Humidity (%)",
+                                    "id": "humidity",
+                                    "type": "numeric",
+                                    "format": {"specifier": ".1f"},
+                                },
+                            ],
+                            data=[],
+                            sort_action="native",
+                            page_action="native",
+                            page_current=0,
+                            page_size=10,
+                            style_table={
+                                "overflowX": "auto",
+                                "borderRadius": "10px",
+                                "border": "1px solid #e9ecef",
+                            },
+                            style_header={
+                                "backgroundColor": "#f8f9fa",
+                                "color": "#495057",
+                                "fontWeight": "600",
+                                "textAlign": "center",
+                                "border": "1px solid #dee2e6",
+                                "fontSize": "1rem",
+                                "padding": "12px",
+                            },
+                            style_cell={
+                                "textAlign": "center",
+                                "padding": "12px",
+                                "fontSize": "0.95rem",
+                                "border": "1px solid #dee2e6",
+                                "backgroundColor": "#ffffff",
+                                "fontFamily": "'Inter', sans-serif",
+                            },
+                            style_data_conditional=[
+                                {
+                                    "if": {"row_index": "odd"},
+                                    "backgroundColor": "#f8f9fa",
+                                }
+                            ],
+                        ),
+                    ],
+                ),
+                # Auto-refresh interval
+                dcc.Interval(
+                    id="interval-component",
+                    interval=2 * 1000,  # Update every 2 seconds
+                    n_intervals=0,
+                ),
+                # Footer
+                html.Div(
+                    className="footer",
+                    children=[
                         html.P(
-                            "Total Records: 0",
-                            id="record-count",
-                            className="record-count",
+                            "🚀 DHT11 IoT Dashboard | Real-time monitoring with MQTT",
+                            style={"margin": 0, "fontSize": "0.9rem"},
                         ),
-                        html.Button(
-                            "📥 Download CSV",
-                            id="download-btn",
-                            n_clicks=0,
-                            className="btn btn-primary btn-full",
-                        ),
-                        dcc.Download(id="download-dataframe-csv"),
                     ],
                 ),
-            ],
+            ],  # Close container
         ),
-        
-        # Current Values Section
-        html.Div(
-            className="readings-section",
-            children=[
-                html.H3(
-                    "📈 Live Readings",
-                    className="section-title",
-                ),
-                html.Div(
-                    className="readings-grid",
-                    children=[
-                        # Temperature Card
-                        html.Div(
-                            className="reading-card temp-card",
-                            children=[
-                                html.Div("🌡️", className="card-icon"),
-                                html.H2(
-                                    id="current-temp",
-                                    children="--°C",
-                                    className="reading-value temp-value",
-                                ),
-                                html.P("Temperature", className="reading-label"),
-                            ],
-                        ),
-                        
-                        # Humidity Card
-                        html.Div(
-                            className="reading-card humidity-card",
-                            children=[
-                                html.Div("💧", className="card-icon"),
-                                html.H2(
-                                    id="current-humidity",
-                                    children="--%",
-                                    className="reading-value humidity-value",
-                                ),
-                                html.P("Humidity", className="reading-label"),
-                            ],
-                        ),
-                    ]
-                ),
-            ],
-        ),
-        
-        # Charts Section
-        html.Div(
-            className="charts-section",
-            children=[
-                html.H3("📊 Historical Charts", className="section-title"),
-                dcc.Graph(id="temperature-chart", className="chart"),
-                dcc.Graph(id="humidity-chart", className="chart"),
-            ],
-        ),
-        
-        # Data Table Section
-        html.Div(
-            className="table-section",
-            children=[
-                html.H3("📋 Historical Data Table", className="section-title"),
-                dash_table.DataTable(
-                    id="data-table",
-                    columns=[
-                        {"name": "Time", "id": "timestamp", "type": "datetime"},
-                        {"name": "Temperature (°C)", "id": "temperature", "type": "numeric", "format": {"specifier": ".1f"}},
-                        {"name": "Humidity (%)", "id": "humidity", "type": "numeric", "format": {"specifier": ".1f"}},
-                    ],
-                    data=[],
-                    sort_action="native",
-                    page_action="native",
-                    page_current=0,
-                    page_size=10,
-                    style_table={
-                        "overflowX": "auto",
-                        "borderRadius": "10px",
-                        "border": "1px solid #e9ecef",
-                    },
-                    style_header={
-                        "backgroundColor": "#f8f9fa",
-                        "color": "#495057",
-                        "fontWeight": "600",
-                        "textAlign": "center",
-                        "border": "1px solid #dee2e6",
-                        "fontSize": "1rem",
-                        "padding": "12px",
-                    },
-                    style_cell={
-                        "textAlign": "center",
-                        "padding": "12px",
-                        "fontSize": "0.95rem",
-                        "border": "1px solid #dee2e6",
-                        "backgroundColor": "#ffffff",
-                        "fontFamily": "'Inter', sans-serif",
-                    },
-                    style_data_conditional=[
-                        {
-                            "if": {"row_index": "odd"},
-                            "backgroundColor": "#f8f9fa",
-                        }
-                    ],
-                ),
-            ],
-        ),
-        
-        # Auto-refresh interval
-        dcc.Interval(
-            id="interval-component",
-            interval=2 * 1000,  # Update every 2 seconds
-            n_intervals=0,
-        ),
-        
-        # Footer
-        html.Div(
-            className="footer",
-            children=[
-                html.P(
-                    "🚀 DHT11 IoT Dashboard | Real-time monitoring with MQTT",
-                    style={"margin": 0, "fontSize": "0.9rem"},
-                ),
-            ],
-        ),
-            ], # Close container
-        ),
-    ], # Close main-container
+    ],  # Close main-container
 )
 
 # Add custom CSS
-app.index_string = '''
+app.index_string = """
 <!DOCTYPE html>
 <html>
     <head>
@@ -629,7 +645,7 @@ app.index_string = '''
         </footer>
     </body>
 </html>
-'''
+"""
 
 
 # Callback for LED control
@@ -671,30 +687,31 @@ def update_current_values(n):
     else:
         current_temp = "--°C"
         current_humidity = "--%"
-    
+
     record_count = f"Total Records: {len(temperature_data)}"
-    
+
     return current_temp, current_humidity, record_count
 
 
 # Callback for updating data table
 @app.callback(
-    Output("data-table", "data"),
-    [Input("interval-component", "n_intervals")]
+    Output("data-table", "data"), [Input("interval-component", "n_intervals")]
 )
 def update_data_table(n):
     if len(temperature_data) == 0:
         return []
-    
+
     # Create DataFrame with latest data first
     data = []
     for i in range(len(temperature_data) - 1, -1, -1):  # Reverse order (latest first)
-        data.append({
-            "timestamp": timestamps[i].strftime("%Y-%m-%d %H:%M:%S"),
-            "temperature": round(temperature_data[i], 1),
-            "humidity": round(humidity_data[i], 1)
-        })
-    
+        data.append(
+            {
+                "timestamp": timestamps[i].strftime("%Y-%m-%d %H:%M:%S"),
+                "temperature": round(temperature_data[i], 1),
+                "humidity": round(humidity_data[i], 1),
+            }
+        )
+
     return data
 
 
@@ -707,17 +724,19 @@ def update_data_table(n):
 def download_csv(n_clicks):
     if n_clicks is None or len(temperature_data) == 0:
         return dash.no_update
-    
+
     # Create DataFrame
-    df = pd.DataFrame({
-        "Timestamp": [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in timestamps],
-        "Temperature_C": [round(temp, 1) for temp in temperature_data],
-        "Humidity_Percent": [round(hum, 1) for hum in humidity_data]
-    })
-    
+    df = pd.DataFrame(
+        {
+            "Timestamp": [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in timestamps],
+            "Temperature_C": [round(temp, 1) for temp in temperature_data],
+            "Humidity_Percent": [round(hum, 1) for hum in humidity_data],
+        }
+    )
+
     # Generate filename with current timestamp
     filename = f"dht11_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    
+
     return dcc.send_data_frame(df.to_csv, filename, index=False)
 
 
@@ -746,7 +765,7 @@ def update_charts(n):
             "text": "🌡️ Temperature Trend",
             "x": 0.5,
             "xanchor": "center",
-            "font": {"size": 18, "color": "#2c3e50"}
+            "font": {"size": 18, "color": "#2c3e50"},
         },
         xaxis_title="Time",
         yaxis_title="Temperature (°C)",
@@ -778,7 +797,7 @@ def update_charts(n):
             "text": "💧 Humidity Trend",
             "x": 0.5,
             "xanchor": "center",
-            "font": {"size": 18, "color": "#2c3e50"}
+            "font": {"size": 18, "color": "#2c3e50"},
         },
         xaxis_title="Time",
         yaxis_title="Humidity (%)",
