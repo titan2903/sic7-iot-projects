@@ -33,7 +33,7 @@ PubSubClient client(espClient);
 
 // Variables
 unsigned long lastMsg = 0;
-const unsigned long msgInterval = 5000; // Send data every 5 seconds
+const unsigned long msgInterval = 3000; // Send data every 3 seconds
 bool ledState = false;
 
 void setup_wifi()
@@ -41,12 +41,18 @@ void setup_wifi()
   delay(10);
   // connect to WiFi (silent)
 
+  Serial.print("Connecting to WiFi");
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED)
   {
+    Serial.print(".");
     delay(500);
   }
+
+  Serial.println();
+  Serial.print("WiFi connected, IP: ");
+  Serial.println(WiFi.localIP());
 
   randomSeed(micros());
 }
@@ -83,23 +89,28 @@ void reconnect()
 {
   while (!client.connected())
   {
+    Serial.print("Attempting MQTT connection...");
     String clientId = "ESP32Client-";
     clientId += String(random(0xffff), HEX);
 
     if (client.connect(clientId.c_str(), mqtt_username, mqtt_password))
     {
-      // Once connected, publish an announcement...
+      Serial.println(" connected");
+      // Once connected, subscribe to control topic and publish an announcement
+      if (client.subscribe(led_control_topic))
+      {
+        Serial.println("Subscribed to LED control topic");
+      }
       client.publish(temp_humidity_topic, "ESP32 connected");
     }
     else
     {
-      // subscribe to control topic
-      client.subscribe(led_control_topic);
+      // keep failure info and retry
+      Serial.print("MQTT connect failed, rc=");
+      Serial.println(client.state());
+      Serial.println("Retrying in 5 seconds...");
+      delay(5000);
     }
-    // keep failure info
-    Serial.print("MQTT connect failed, rc=");
-    Serial.println(client.state());
-    delay(5000);
   }
 }
 
@@ -125,9 +136,18 @@ void publishSensorData()
   String payload;
   serializeJson(doc, payload);
 
-  // Publish to MQTT
+  // Log readings and payload for visibility
+  Serial.print("Publishing -> Temp: ");
+  Serial.print(temperature);
+  Serial.print(" C, Humidity: ");
+  Serial.print(humidity);
+  Serial.print(" %, Data: ");
+  Serial.println(payload);
+
+  // Publish to MQTT and log result
   if (client.publish(temp_humidity_topic, payload.c_str()))
   {
+    Serial.println("Publish successful");
   }
   else
   {
