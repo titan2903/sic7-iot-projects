@@ -65,23 +65,51 @@ void callback(char *topic, byte *payload, unsigned int length)
     message += (char)payload[i];
   }
 
-  // Parse JSON message for LED control
-  DynamicJsonDocument doc(1024);
-  deserializeJson(doc, message);
+  // Log received raw message for debugging
+  Serial.print("MQTT message arrived [");
+  Serial.print(topic);
+  Serial.print("] payload: ");
+  Serial.println(message);
 
-  if (doc.containsKey("led"))
+  // Try to parse JSON message for LED control. If payload is plain text
+  // (e.g., "on" / "off"), fall back to using the raw message.
+  String ledCommand;
+  DynamicJsonDocument doc(1024);
+  DeserializationError err = deserializeJson(doc, message);
+
+  if (!err && doc.containsKey("led"))
   {
-    String ledCommand = doc["led"];
-    if (ledCommand == "on")
-    {
-      digitalWrite(LED_PIN, HIGH);
-      ledState = true;
-    }
-    else if (ledCommand == "off")
-    {
-      digitalWrite(LED_PIN, LOW);
-      ledState = false;
-    }
+    // JSON payload with {"led":"on"}
+    const char *v = doc["led"];
+    if (v)
+      ledCommand = String(v);
+  }
+  else
+  {
+    // Fallback: use raw payload (trim whitespace)
+    ledCommand = message;
+  }
+
+  // Normalize command to lower-case for comparison
+  ledCommand.trim();
+  ledCommand.toLowerCase();
+
+  if (ledCommand == "on")
+  {
+    digitalWrite(LED_PIN, HIGH);
+    ledState = true;
+    Serial.println("LED -> ON (command processed)");
+  }
+  else if (ledCommand == "off")
+  {
+    digitalWrite(LED_PIN, LOW);
+    ledState = false;
+    Serial.println("LED -> OFF (command processed)");
+  }
+  else
+  {
+    Serial.print("Unknown LED command: ");
+    Serial.println(ledCommand);
   }
 }
 
